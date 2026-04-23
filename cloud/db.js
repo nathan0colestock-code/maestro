@@ -125,5 +125,8 @@ safeMigrate('ALTER TABLE feature_sets ADD COLUMN note TEXT');
 safeMigrate('ALTER TABLE feature_sets ADD COLUMN deployed_at TEXT');
 // Per-project deploy status for the dashboard.
 safeMigrate('ALTER TABLE feature_sets ADD COLUMN deploy_status TEXT');
+// User-initiated cancel flag — daemon checks between pipeline phases and
+// aborts if set, leaving a note pointing at the interrupted phase.
+safeMigrate('ALTER TABLE feature_sets ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0');
 
 export default db;
