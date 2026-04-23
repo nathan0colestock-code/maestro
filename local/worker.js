@@ -104,9 +104,14 @@ function parseQuestions(summary) {
   return out;
 }
 
-export function startWorker({ projectName, projectPath, task, context, priorQA, addDirs = [], projectStats, onStart, onEnd }) {
-  if (!canStart(projectName)) {
-    console.log(`  [worker] ${projectName} already has an active worker — skipping dispatch`);
+export function startWorker({ projectName, projectPath, task, context, priorQA, addDirs = [], peerProjects = [], projectStats, onStart, onEnd }) {
+  // Reserve the primary AND every peer project. Two workers operating in the
+  // same working directory (one as primary, the other via --add-dir) will
+  // stomp on each other's branch checkouts — classic cross-project race.
+  const reserved = [projectName, ...peerProjects.filter(p => p && p !== projectName)];
+  const blocked = reserved.find(p => !canStart(p));
+  if (blocked) {
+    console.log(`  [worker] ${projectName} blocked — peer ${blocked} already has an active worker; skipping dispatch`);
     return null;
   }
 
@@ -128,8 +133,8 @@ export function startWorker({ projectName, projectPath, task, context, priorQA, 
     prompt,
   );
 
-  console.log(`  [worker] launching claude -p in ${projectPath} (run ${runId.slice(0, 8)})`);
-  markStart(projectName);
+  console.log(`  [worker] launching claude -p in ${projectPath} (run ${runId.slice(0, 8)})${reserved.length > 1 ? ` — reserving peers: ${reserved.slice(1).join(', ')}` : ''}`);
+  for (const p of reserved) markStart(p);
 
   const started = new Date().toISOString();
   const child = spawn(CLAUDE_BIN, args, {
@@ -174,14 +179,14 @@ export function startWorker({ projectName, projectPath, task, context, priorQA, 
 
   child.on('error', err => {
     clearTimeout(killTimer);
-    markEnd(projectName);
+    for (const p of reserved) markEnd(p);
     console.error(`  [worker] spawn error for ${projectName}:`, err.message);
     onEnd?.({ runId, sessionId, projectName, ended: new Date().toISOString(), status: 'error', summary: err.message, questions: [] });
   });
 
   child.on('exit', code => {
     clearTimeout(killTimer);
-    markEnd(projectName);
+    for (const p of reserved) markEnd(p);
     const ended = new Date().toISOString();
     let summary = '';
     let cost = null;

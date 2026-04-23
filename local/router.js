@@ -82,7 +82,8 @@ ${projectLines}
 ## Routing Rules
 
 - If a capture is about **building an integration between projects** (one app calling another, sharing data, webhooks, shared contracts), emit a SINGLE task with \`is_integration: true\`, a primary \`project\` (the service/owner of the contract — usually the callee), and \`integration_projects\` listing the other involved projects. A single worker will handle both sides with a shared spec.
-- If a capture is unrelated to integration but happens to touch multiple projects, decompose it into separate items per project (current behavior).
+- If a capture asks for **the same change applied across multiple apps** ("in all apps", "across the suite", "every project", or explicitly naming 3+ projects getting the same treatment — e.g. "remove the app switcher from flock, gloss, tend, and comms"), emit a SINGLE task with \`is_integration: true\`, pick any one of the named projects as the primary \`project\`, and list the REST in \`integration_projects\`. Do NOT decompose into N separate per-project sets — that creates N branches instead of one coordinated change and explodes the merge/deploy blast radius. One worker, one branch name, fans out across the listed repos.
+- If a capture is unrelated to integration and genuinely asks for different work in different projects, decompose it into separate items per project.
 - For each "task" action, you MUST either attach to an existing feature_set_id (when the capture clearly extends an open set) OR propose a new feature set with a short title + one-sentence description.
 - Prefer attaching to an existing set if the topic overlaps; only create a new set when the capture introduces a genuinely new theme.
 - "note" and "doc" actions do not belong to feature sets — they get filed directly.
@@ -120,7 +121,25 @@ ${projects.map(p => formatTimingLine(p.name, projectStatsByName[p.name])).join('
 ${SUITE_SYSTEM_CONTEXT}` : ''}`;
 }
 
-export async function routeCapture(captureText, projects, sessions, openFeatureSets = []) {
+// Transient errors we retry with exponential backoff: 429 rate limit, 5xx,
+// network flakes, empty body. Permanent errors (400 bad prompt, 401 key) fail fast.
+function isTransientGeminiError(err) {
+  const msg = String(err?.message || err || '');
+  const status = err?.status ?? err?.code;
+  if (status === 429 || (typeof status === 'number' && status >= 500 && status < 600)) return true;
+  if (/\b(429|5\d\d)\b/.test(msg)) return true;
+  if (/RESOURCE_EXHAUSTED|UNAVAILABLE|DEADLINE_EXCEEDED|INTERNAL/i.test(msg)) return true;
+  if (/fetch failed|network|ETIMEDOUT|ECONNRESET|socket hang up/i.test(msg)) return true;
+  if (/empty response/i.test(msg)) return true;
+  return false;
+}
+
+export async function routeCapture(captureText, projects, sessions, openFeatureSets = [], opts = {}) {
+  const maxAttempts = opts.maxAttempts ?? 4;
+  const baseDelayMs = opts.baseDelayMs ?? 1000;
+  const sleep = opts.sleep ?? (ms => new Promise(r => setTimeout(r, ms)));
+  const generate = opts.generate ?? ((params) => genai.models.generateContent(params));
+
   // Pull stats for every project in parallel. getProjectStats is cached
   // (10 min TTL) so rapid capture bursts don't hammer the cloud.
   const statsPairs = await Promise.all(projects.map(async p => {
@@ -130,20 +149,36 @@ export async function routeCapture(captureText, projects, sessions, openFeatureS
   const projectStatsByName = Object.fromEntries(statsPairs);
   const systemInstruction = buildSystemPrompt(projects, sessions, openFeatureSets, projectStatsByName);
 
-  const response = await genai.models.generateContent({
-    model: ROUTER_MODEL,
-    contents: [{ role: 'user', parts: [{ text: captureText }] }],
-    config: {
-      systemInstruction,
-      responseMimeType: 'application/json',
-      temperature: 0.2,
-      maxOutputTokens: 2048,
-    },
-  });
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const response = await generate({
+        model: ROUTER_MODEL,
+        contents: [{ role: 'user', parts: [{ text: captureText }] }],
+        config: {
+          systemInstruction,
+          responseMimeType: 'application/json',
+          temperature: 0.2,
+          maxOutputTokens: 2048,
+        },
+      });
 
-  const raw = (response.text || '').trim();
-  if (!raw) throw new Error('Gemini returned empty response');
+      const raw = (response.text || '').trim();
+      if (!raw) throw new Error('Gemini returned empty response');
 
-  const cleaned = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '');
-  return JSON.parse(cleaned);
+      const cleaned = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '');
+      return JSON.parse(cleaned);
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientGeminiError(err) || attempt === maxAttempts) throw err;
+      // Jittered exponential backoff: 1s, 2s, 4s (+ up to 500ms jitter).
+      const delay = baseDelayMs * 2 ** (attempt - 1) + Math.floor(Math.random() * 500);
+      console.warn(`[router] transient error on attempt ${attempt}/${maxAttempts}: ${err.message} — retrying in ${delay}ms`);
+      await sleep(delay);
+    }
+  }
+  throw lastErr;
 }
+
+// Exported for unit testing — pure function, no I/O.
+export const _test = { isTransientGeminiError };

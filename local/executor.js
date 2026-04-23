@@ -80,7 +80,19 @@ export async function dispatchFeatureSet({ projectName, projectPath, featureSet,
   const extras = Array.isArray(featureSet.extra_projects) ? featureSet.extra_projects : [];
   const extraPaths = extras.map(p => PROJECT_PATHS[p]).filter(Boolean);
 
-  const taskLines = featureSet.tasks.map((t, i) => `${i + 1}. ${t.text}${t.context ? ` — ${t.context}` : ''}`).join('\n');
+  // Dedupe task rows by normalized (text, context). Absorbed feature sets
+  // often contain N near-identical rows (one per per-project split the
+  // router produced before we caught the fan-out) — rendering all N into
+  // the worker prompt is noise that invites the model to over-scope.
+  const seen = new Set();
+  const taskLines = featureSet.tasks
+    .filter(t => {
+      const key = `${(t.text || '').trim().toLowerCase()}|${(t.context || '').trim().toLowerCase()}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .map((t, i) => `${i + 1}. ${t.text}${t.context ? ` — ${t.context}` : ''}`).join('\n');
 
   const integrationSection = extras.length ? `
 
@@ -108,7 +120,7 @@ Create a branch named \`${branch}\` and implement all tasks on it. Commit each t
 
   const meta = startWorker({
     projectName, projectPath, task: bundlePrompt, context: null, priorQA: [],
-    addDirs: extraPaths, projectStats,
+    addDirs: extraPaths, peerProjects: extras, projectStats,
     onStart: async ({ runId, sessionId, started }) => {
       await cloudApi?.('POST', '/api/worker/start', {
         run_id: runId, session_id: sessionId, project_name: projectName,

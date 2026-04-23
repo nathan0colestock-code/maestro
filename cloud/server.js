@@ -381,13 +381,18 @@ app.post('/api/feature-sets', auth, (req, res) => {
 // PATCH /api/feature-sets/:id — update title/description (clarity pass)
 // GET /api/feature-sets/:id — single-row fetch; daemon uses this to poll
 // for the cancel_requested flag between pipeline phases.
-app.get('/api/feature-sets/:id', auth, (req, res) => {
+//
+// `:id(\\d+)` constrains the param to digits so it does NOT shadow sibling
+// routes like /drain, /stats, /merge-requested, /nightly-kickoff. Before
+// this constraint, `GET /api/feature-sets/drain` matched this handler with
+// :id="drain" and returned 404 "not found" instead of the drain payload.
+app.get('/api/feature-sets/:id(\\d+)', auth, (req, res) => {
   const row = db.prepare(`SELECT * FROM feature_sets WHERE id = ?`).get(req.params.id);
   if (!row) return res.status(404).json({ error: 'not found' });
   res.json(row);
 });
 
-app.patch('/api/feature-sets/:id', auth, (req, res) => {
+app.patch('/api/feature-sets/:id(\\d+)', auth, (req, res) => {
   const { title, description } = req.body;
   const fields = [], vals = [];
   if (title !== undefined) { fields.push('title = ?'); vals.push(title); }
@@ -425,6 +430,57 @@ app.post('/api/feature-sets/:id/cancel', auth, (req, res) => {
   ).get(req.params.id);
   if (!row) return res.status(404).json({ error: 'not found' });
   res.json(row);
+});
+
+// POST /api/feature-sets/:id/absorb — collapse sibling feature sets into this one.
+// Body: { source_ids: [number, ...], extra_projects?: string[] }
+// Moves every task from each source set into this one, marks source sets
+// `status='cancelled'` (terminal, ignored by drain + kickoff), and optionally
+// widens this set's extra_projects (useful when fixing a fan-out that the
+// router accidentally split into N per-project sets).
+// Idempotent: absorbing an already-cancelled set is a no-op.
+app.post('/api/feature-sets/:id/absorb', auth, (req, res) => {
+  const targetId = Number(req.params.id);
+  const { source_ids, extra_projects } = req.body || {};
+  if (!Array.isArray(source_ids) || source_ids.length === 0) {
+    return res.status(400).json({ error: 'source_ids must be a non-empty array' });
+  }
+  const target = db.prepare('SELECT * FROM feature_sets WHERE id = ?').get(targetId);
+  if (!target) return res.status(404).json({ error: 'target feature set not found' });
+  if (source_ids.includes(targetId)) {
+    return res.status(400).json({ error: 'cannot absorb a set into itself' });
+  }
+
+  const tx = db.transaction(() => {
+    let movedTasks = 0;
+    for (const sid of source_ids) {
+      const src = db.prepare('SELECT id, status FROM feature_sets WHERE id = ?').get(sid);
+      if (!src) continue;
+      const r = db.prepare(
+        `UPDATE tasks SET feature_set_id = ? WHERE feature_set_id = ?`
+      ).run(targetId, sid);
+      movedTasks += r.changes;
+      db.prepare(
+        `UPDATE feature_sets SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?`
+      ).run(sid);
+    }
+    if (Array.isArray(extra_projects)) {
+      const filtered = extra_projects.filter(p => p && p !== target.project_name);
+      const encoded = filtered.length ? JSON.stringify(filtered) : null;
+      db.prepare(
+        `UPDATE feature_sets SET extra_projects = ?, updated_at = datetime('now') WHERE id = ?`
+      ).run(encoded, targetId);
+    } else {
+      db.prepare(
+        `UPDATE feature_sets SET updated_at = datetime('now') WHERE id = ?`
+      ).run(targetId);
+    }
+    return movedTasks;
+  });
+
+  const movedTasks = tx();
+  const fresh = db.prepare('SELECT * FROM feature_sets WHERE id = ?').get(targetId);
+  res.json({ ok: true, target: hydrateSet(fresh), moved_tasks: movedTasks, absorbed: source_ids });
 });
 
 // POST /api/feature-sets/:id/merge — user approved; daemon will perform local git merge
@@ -495,7 +551,7 @@ app.get('/api/feature-sets/drain', auth, (req, res) => {
     SELECT * FROM feature_sets
     WHERE project_name = ? AND (status = 'queued' OR manual_run = 1)
       AND status NOT IN (
-        'running','done','failed','merged',
+        'running','done','failed','merged','cancelled',
         'merge_requested','merge_failed','test_failed',
         'merged_and_deployed','deploy_failed_reverted','integration_failed'
       )

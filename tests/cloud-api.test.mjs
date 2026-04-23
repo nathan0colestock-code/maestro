@@ -232,6 +232,67 @@ describe('cloud API', () => {
     }
   });
 
+  test('absorb endpoint collapses sibling feature sets into target', async () => {
+    // Create three peer sets + tasks in each
+    const a = await cloud.req('POST', '/api/feature-sets', { project_name: 'flock', title: 'app switcher', description: 'for flock' });
+    const b = await cloud.req('POST', '/api/feature-sets', { project_name: 'gloss', title: 'app switcher', description: 'for gloss' });
+    const c = await cloud.req('POST', '/api/feature-sets', { project_name: 'tend', title: 'app switcher', description: 'for tend' });
+    const tA = await cloud.req('POST', '/api/tasks', { project_name: 'flock', text: 'remove in flock', feature_set_id: a.body.id });
+    const tB = await cloud.req('POST', '/api/tasks', { project_name: 'gloss', text: 'remove in gloss', feature_set_id: b.body.id });
+    const tC = await cloud.req('POST', '/api/tasks', { project_name: 'tend', text: 'remove in tend', feature_set_id: c.body.id });
+
+    const absorb = await cloud.req('POST', `/api/feature-sets/${a.body.id}/absorb`, {
+      source_ids: [b.body.id, c.body.id],
+      extra_projects: ['gloss', 'tend'],
+    });
+    assert.equal(absorb.status, 200);
+    assert.equal(absorb.body.ok, true);
+    assert.equal(absorb.body.moved_tasks, 2);
+    assert.deepEqual(absorb.body.target.extra_projects, ['gloss', 'tend']);
+
+    // All three tasks should now belong to set a
+    const sets = await cloud.req('GET', '/api/feature-sets');
+    const target = sets.body.find(s => s.id === a.body.id);
+    assert.equal(target.tasks.length, 3, 'target absorbs all tasks');
+    assert.ok(target.tasks.some(t => t.id === tA.body.id));
+    assert.ok(target.tasks.some(t => t.id === tB.body.id));
+    assert.ok(target.tasks.some(t => t.id === tC.body.id));
+
+    // Sources are cancelled
+    const srcB = sets.body.find(s => s.id === b.body.id);
+    const srcC = sets.body.find(s => s.id === c.body.id);
+    assert.equal(srcB.status, 'cancelled');
+    assert.equal(srcC.status, 'cancelled');
+    assert.equal(srcB.tasks.length, 0, 'source set has no tasks');
+  });
+
+  test('absorb rejects self-absorption and missing source_ids', async () => {
+    const x = await cloud.req('POST', '/api/feature-sets', { project_name: 'flock', title: 'x' });
+    const self = await cloud.req('POST', `/api/feature-sets/${x.body.id}/absorb`, { source_ids: [x.body.id] });
+    assert.equal(self.status, 400);
+    const empty = await cloud.req('POST', `/api/feature-sets/${x.body.id}/absorb`, { source_ids: [] });
+    assert.equal(empty.status, 400);
+    const missing = await cloud.req('POST', `/api/feature-sets/${x.body.id}/absorb`, {});
+    assert.equal(missing.status, 400);
+  });
+
+  test('cancelled feature set does not appear in drain', async () => {
+    // Queue a normal feature set and a cancelled one for the same project
+    const keep = await cloud.req('POST', '/api/feature-sets', { project_name: 'drain-cancel-test', title: 'keep' });
+    const drop = await cloud.req('POST', '/api/feature-sets', { project_name: 'drain-cancel-test', title: 'drop' });
+    await cloud.req('POST', '/api/tasks', { project_name: 'drain-cancel-test', text: 'one', feature_set_id: keep.body.id });
+    await cloud.req('POST', '/api/tasks', { project_name: 'drain-cancel-test', text: 'two', feature_set_id: drop.body.id });
+    // Cancel 'drop' via absorb into 'keep'
+    const abs = await cloud.req('POST', `/api/feature-sets/${keep.body.id}/absorb`, { source_ids: [drop.body.id] });
+    assert.equal(abs.status, 200, 'absorb must succeed');
+    // Kickoff flips collecting → queued
+    const kick = await cloud.req('POST', '/api/feature-sets/nightly-kickoff');
+    assert.equal(kick.status, 200, 'kickoff must succeed');
+    const drained = await cloud.req('GET', '/api/feature-sets/drain?project=drain-cancel-test');
+    assert.ok(drained.body, `drain returned ${JSON.stringify(drained.body)}`);
+    assert.equal(drained.body.id, keep.body.id, 'cancelled set is never drained');
+  });
+
   test('projects payload includes worker_runs and active_workers count', async () => {
     await cloud.req('POST', '/api/worker/start', {
       run_id: 'active-run', project_name: 'active-test', task: 'something',

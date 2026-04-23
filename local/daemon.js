@@ -191,10 +191,17 @@ async function drainFeatureSets() {
   if (!isAutoLaunchEnabled()) return;
   const sessions = sessionsByProject();
 
+  // Projects we've committed to a dispatched set in THIS tick. A set with
+  // peers reserves every involved project so the next project's drain in
+  // the same pass can't pick up something that shares a peer (e.g. an
+  // integration set spanning flock+gloss must block gloss's own drain).
+  const reservedThisTick = new Set();
+
   for (const project of cachedProjects) {
     const session = sessions[project.name];
     if (session?.is_active === 1) continue;
     if (hasActiveWorker(project.name)) continue;
+    if (reservedThisTick.has(project.name)) continue;
 
     let set;
     try {
@@ -202,17 +209,32 @@ async function drainFeatureSets() {
     } catch { continue; }
     if (!set) continue;
 
+    const extras = Array.isArray(set.extra_projects) ? set.extra_projects : [];
+    const involved = [project.name, ...extras.filter(p => p && p !== project.name)];
+
+    // Peer-busy check: if ANY involved project has an active worker or was
+    // reserved earlier in this tick, defer this set. It stays queued;
+    // next drain tick will retry once the peer frees up.
+    const busyPeer = involved.find(p => hasActiveWorker(p) || reservedThisTick.has(p));
+    if (busyPeer) {
+      console.log(`[drain] ${project.name} feature set #${set.id} deferred — peer ${busyPeer} busy`);
+      continue;
+    }
+
     const projectPath = getProjectPath(project.name);
     if (!projectPath) continue;
 
-    console.log(`[drain] ${project.name} → feature set #${set.id} "${set.title}" (${set.tasks.length} task(s))`);
+    console.log(`[drain] ${project.name} → feature set #${set.id} "${set.title}" (${set.tasks.length} task(s))${extras.length ? ` [+peers: ${extras.join(', ')}]` : ''}`);
     let projectStats = null;
     try { projectStats = await getProjectStats(project.name, { lookback_days: 7 }); } catch {}
     try {
-      await dispatchFeatureSet({
+      const result = await dispatchFeatureSet({
         projectName: project.name, projectPath,
         featureSet: set, cloudApi: api, projectStats,
       });
+      if (result?.status === 'worker_started') {
+        for (const p of involved) reservedThisTick.add(p);
+      }
     } catch (err) {
       console.error(`[drain] ${project.name} dispatch failed:`, err.message);
     }
