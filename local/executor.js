@@ -7,12 +7,12 @@ const exec = promisify(execCallback);
 
 const PROJECT_PATHS = {
   flock: '/Users/nathancolestock/flock',
-  foxed: '/Users/nathancolestock/foxed',
+  gloss: '/Users/nathancolestock/gloss',
   tend: '/Users/nathancolestock/tend',
   comms: '/Users/nathancolestock/comms',
   maestro: '/Users/nathancolestock/maestro',
   scribe: '/Users/nathancolestock/scribe',
-  'black-hole': '/Users/nathancolestock/black-hole',
+  black: '/Users/nathancolestock/black',
 };
 
 const AUTO_LAUNCH = process.env.AUTO_LAUNCH_SESSIONS !== 'false';

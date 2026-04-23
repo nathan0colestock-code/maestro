@@ -5,12 +5,12 @@ import { execSync } from 'child_process';
 // Projects to track — extend this list as you add more apps
 const PROJECTS = [
   { name: 'flock', path: '/Users/nathancolestock/flock' },
-  { name: 'foxed', path: '/Users/nathancolestock/foxed' },
+  { name: 'gloss', path: '/Users/nathancolestock/gloss' },
   { name: 'tend', path: '/Users/nathancolestock/tend' },
   { name: 'comms', path: '/Users/nathancolestock/comms' },
   { name: 'maestro', path: '/Users/nathancolestock/maestro' },
   { name: 'scribe', path: '/Users/nathancolestock/scribe' },
-  { name: 'black-hole', path: '/Users/nathancolestock/black-hole' },
+  { name: 'black', path: '/Users/nathancolestock/black' },
 ];
 
 async function fileExists(p) {

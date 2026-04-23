@@ -447,7 +447,7 @@ app.get('/api/worker/runs', auth, (req, res) => {
   res.json(rows);
 });
 
-// GET /api/hook/tasks?project=foxed — UserPromptSubmit hook pulls pending tasks,
+// GET /api/hook/tasks?project=gloss — UserPromptSubmit hook pulls pending tasks,
 // then marks them delivered so they don't get re-injected into every prompt.
 app.get('/api/hook/tasks', auth, (req, res) => {
   const { project } = req.query;
