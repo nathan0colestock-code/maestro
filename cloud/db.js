@@ -119,5 +119,11 @@ safeMigrate('ALTER TABLE worker_runs ADD COLUMN feature_set_id INTEGER');
 safeMigrate('ALTER TABLE tasks ADD COLUMN feature_set_id INTEGER');
 safeMigrate('ALTER TABLE feature_sets ADD COLUMN clarified_at TEXT');
 safeMigrate('ALTER TABLE feature_sets ADD COLUMN extra_projects TEXT');
+// Overnight-loop pipeline columns: status notes (test/deploy failure details),
+// deployment timestamps, post-deploy health.
+safeMigrate('ALTER TABLE feature_sets ADD COLUMN note TEXT');
+safeMigrate('ALTER TABLE feature_sets ADD COLUMN deployed_at TEXT');
+// Per-project deploy status for the dashboard.
+safeMigrate('ALTER TABLE feature_sets ADD COLUMN deploy_status TEXT');
 
 export default db;
