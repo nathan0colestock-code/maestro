@@ -1,9 +1,18 @@
 import { scanProjects } from './project-scanner.js';
 import { readSessions } from './session-reader.js';
 import { routeCapture } from './router.js';
-import { executeRoutingPlan, dispatchTask, dispatchFeatureSet, mergeFeatureSet, getProjectPath, isAutoLaunchEnabled } from './executor.js';
+import { executeRoutingPlan, dispatchTask, dispatchFeatureSet, mergeFeatureSet, getProjectPath, isAutoLaunchEnabled, isAutoMergeEnabled } from './executor.js';
 import { hasActiveWorker } from './worker.js';
 import { synthesizeProject, clarifyFeatureSet } from './synthesis.js';
+import { deployProject } from './deployer.js';
+import { runProjectTests, runIntegrationTests, checkoutBranch } from './test-runner.js';
+import { readFile } from 'fs/promises';
+import { dirname, resolve } from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const SYSTEM_MD_PATH = resolve(__dirname, '..', 'SYSTEM.md');
+let SUITE_SYSTEM_CONTEXT = '';
 
 const CLOUD_URL = process.env.MAESTRO_CLOUD_URL || 'http://localhost:3750';
 const SECRET = process.env.MAESTRO_SECRET || '';
@@ -204,26 +213,129 @@ async function drainFeatureSets() {
   }
 }
 
+// Closed-loop merge pipeline: test branch → merge → deploy each project →
+// health check → auto-revert on failure. The goal is that the user wakes up
+// to either a green "merged_and_deployed" feature set or a clearly-marked
+// failure that rolled production back to its previous good state.
 async function processMergeRequests() {
   let requests;
   try { requests = await api('GET', '/api/feature-sets/merge-requested'); }
   catch { return; }
+
   for (const set of requests || []) {
     const projectPath = getProjectPath(set.project_name);
     if (!projectPath || !set.branch_name) continue;
     const extras = Array.isArray(set.extra_projects) ? set.extra_projects : [];
     const extraPaths = extras.map(p => getProjectPath(p)).filter(Boolean);
+    const allProjects = [set.project_name, ...extras];
     const scope = extras.length ? `${set.project_name}+${extras.join(',')}` : set.project_name;
-    console.log(`[merge] ${scope} branch ${set.branch_name} → main`);
-    try {
-      const out = await mergeFeatureSet({ projectPath, branchName: set.branch_name, extraProjectPaths: extraPaths });
-      await api('POST', `/api/feature-sets/${set.id}/status`, { status: out.ok ? 'merged' : 'merge_failed' });
-      if (!out.ok) console.error(`[merge] failed: ${out.error}`);
-      else if (out.merged?.length) console.log(`[merge] done — merged in ${out.merged.length} repo(s)`);
-    } catch (err) {
-      console.error(`[merge] error on ${set.project_name}:`, err.message);
-      await api('POST', `/api/feature-sets/${set.id}/status`, { status: 'merge_failed' }).catch(() => {});
+
+    // ─── Phase 1: pre-merge tests on the feature branch ──────────────────
+    console.log(`[pipeline] ${scope} branch ${set.branch_name} — running pre-merge tests`);
+    const checkout = await checkoutBranch(projectPath, set.branch_name);
+    if (!checkout.ok) {
+      console.error(`[pipeline] checkout failed: ${checkout.error}`);
+      await api('POST', `/api/feature-sets/${set.id}/status`, {
+        status: 'merge_failed', note: `checkout failed: ${checkout.error}`,
+      }).catch(() => {});
+      continue;
     }
+    const preTest = await runProjectTests(set.project_name);
+    await checkout.restore();
+    if (!preTest.ok) {
+      console.error(`[pipeline] ${set.project_name} tests failed — not merging`);
+      await api('POST', `/api/feature-sets/${set.id}/status`, {
+        status: 'test_failed',
+        note: (preTest.stderr || preTest.error || '').slice(0, 2000),
+      }).catch(() => {});
+      continue;
+    }
+    console.log(`[pipeline] ${set.project_name} tests ${preTest.skipped ? `skipped (${preTest.skipped})` : '✓'}`);
+
+    // ─── Phase 2: merge to main (primary + extras) ──────────────────────
+    let mergeResult;
+    try {
+      mergeResult = await mergeFeatureSet({
+        projectPath, branchName: set.branch_name, extraProjectPaths: extraPaths,
+      });
+    } catch (err) {
+      console.error(`[pipeline] merge error on ${set.project_name}:`, err.message);
+      await api('POST', `/api/feature-sets/${set.id}/status`, {
+        status: 'merge_failed', note: err.message,
+      }).catch(() => {});
+      continue;
+    }
+    if (!mergeResult.ok) {
+      console.error(`[pipeline] merge failed: ${mergeResult.error}`);
+      await api('POST', `/api/feature-sets/${set.id}/status`, {
+        status: 'merge_failed', note: mergeResult.error,
+      }).catch(() => {});
+      continue;
+    }
+    console.log(`[pipeline] merged in ${mergeResult.merged?.length || 0} repo(s) — pushing`);
+
+    // Push each merged repo so the Fly deploy builds from up-to-date main.
+    for (const repoPath of mergeResult.merged || []) {
+      await new Promise(r => setTimeout(r, 100));
+      try {
+        const { exec } = await import('child_process');
+        await new Promise((res, rej) => {
+          exec(`cd "${repoPath}" && git push origin main`, { timeout: 60_000 }, (err, stdout) => {
+            if (err) rej(err); else res(stdout);
+          });
+        });
+      } catch (err) {
+        console.warn(`[pipeline] push failed for ${repoPath}: ${err.message} (continuing — fly deploys from local)`);
+      }
+    }
+
+    // ─── Phase 3: deploy each project, health-check, auto-revert on fail ─
+    const deployResults = [];
+    for (const projectName of allProjects) {
+      const r = await deployProject(projectName);
+      deployResults.push(r);
+      if (!r.ok && !r.skipped) {
+        console.error(`[pipeline] deploy failed for ${projectName} — halting subsequent deploys`);
+        break;
+      }
+    }
+
+    const anyDeployFailed = deployResults.some(r => !r.ok && !r.skipped);
+    if (anyDeployFailed) {
+      await api('POST', `/api/feature-sets/${set.id}/status`, {
+        status: 'deploy_failed_reverted',
+        note: JSON.stringify({
+          failed: deployResults.filter(r => !r.ok && !r.skipped).map(r => ({
+            project: r.projectName, flyApp: r.flyApp, error: r.error,
+            fly_rollback: r.fly_rollback, git_revert: r.git_revert,
+            post_revert_healthy: r.post_revert_healthy,
+          })),
+        }).slice(0, 4000),
+      }).catch(() => {});
+      continue;
+    }
+
+    // ─── Phase 4: post-deploy integration tests (soft — logged, not blocking) ─
+    const integration = await runIntegrationTests().catch(err => ({ ok: false, error: err.message }));
+    if (!integration.ok) {
+      console.warn(`[pipeline] integration tests failed post-deploy — surfacing`);
+      await api('POST', `/api/feature-sets/${set.id}/status`, {
+        status: 'integration_failed',
+        note: ((integration.stderr || '') + '\n' + (integration.stdout || '')).slice(0, 3000),
+      }).catch(() => {});
+      continue;
+    }
+
+    // ─── Success: merged + deployed + integration-tested ─────────────────
+    console.log(`[pipeline] ✓ ${scope} merged_and_deployed`);
+    await api('POST', `/api/feature-sets/${set.id}/status`, {
+      status: 'merged_and_deployed',
+      note: JSON.stringify({
+        deployed: deployResults.filter(r => r.ok && !r.skipped).map(r => ({
+          project: r.projectName, flyApp: r.flyApp, at: r.deployedAt,
+        })),
+      }),
+    }).catch(() => {});
   }
 }
 
@@ -315,6 +427,16 @@ async function main() {
   console.log('Maestro daemon starting...');
   console.log(`Cloud URL: ${CLOUD_URL}`);
   console.log(`Nightly kickoff hour: ${NIGHTLY_KICKOFF_HOUR}:00 local`);
+  console.log(`Auto-merge on tests pass: ${isAutoMergeEnabled() ? 'ON' : 'off'}`);
+
+  // Load SYSTEM.md so the router can inject suite-wide context into Gemini
+  // prompts. Failure to load is non-fatal — the daemon still runs.
+  try {
+    SUITE_SYSTEM_CONTEXT = await readFile(SYSTEM_MD_PATH, 'utf8');
+    console.log(`[system] loaded SYSTEM.md (${SUITE_SYSTEM_CONTEXT.length} chars)`);
+  } catch (err) {
+    console.warn(`[system] SYSTEM.md not loadable: ${err.message}`);
+  }
 
   if (!process.env.GEMINI_API_KEY) {
     console.error('Error: GEMINI_API_KEY not set');

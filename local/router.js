@@ -1,7 +1,19 @@
 import { GoogleGenAI } from '@google/genai';
+import { readFile } from 'fs/promises';
+import { dirname, resolve } from 'path';
+import { fileURLToPath } from 'url';
 
 const genai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const ROUTER_MODEL = 'gemini-2.5-flash';
+
+// Load SYSTEM.md once at module import so every routing call carries the
+// suite-wide map (apps, integration points, pipeline states). Failure is
+// non-fatal — routing still works, it just won't know about integrations.
+let SUITE_SYSTEM_CONTEXT = '';
+try {
+  const here = dirname(fileURLToPath(import.meta.url));
+  SUITE_SYSTEM_CONTEXT = await readFile(resolve(here, '..', 'SYSTEM.md'), 'utf8');
+} catch { /* absent or unreadable — proceed without it */ }
 
 function formatAge(isoString) {
   if (!isoString) return 'unknown';
@@ -79,7 +91,13 @@ Respond ONLY with valid JSON matching this schema:
   ]
 }
 
-For "task" action exactly one of feature_set_id or new_feature_set must be non-null. For "note"/"doc", both should be null. When is_integration=true, integration_projects must be non-empty.`;
+For "task" action exactly one of feature_set_id or new_feature_set must be non-null. For "note"/"doc", both should be null. When is_integration=true, integration_projects must be non-empty.${SUITE_SYSTEM_CONTEXT ? `
+
+---
+
+## Suite system context (from maestro/SYSTEM.md)
+
+${SUITE_SYSTEM_CONTEXT}` : ''}`;
 }
 
 export async function routeCapture(captureText, projects, sessions, openFeatureSets = []) {

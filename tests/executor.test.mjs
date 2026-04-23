@@ -119,8 +119,8 @@ describe('executor.executeRoutingPlan', () => {
 describe('executor.getProjectPath', () => {
   test('returns path for known project', async () => {
     const { getProjectPath } = await import('../local/executor.js');
-    assert.equal(getProjectPath('foxed'), '/Users/nathancolestock/foxed');
-    assert.equal(getProjectPath('black-hole'), '/Users/nathancolestock/black-hole');
+    assert.equal(getProjectPath('gloss'), '/Users/nathancolestock/gloss');
+    assert.equal(getProjectPath('black'), '/Users/nathancolestock/black');
   });
   test('returns undefined for unknown project', async () => {
     const { getProjectPath } = await import('../local/executor.js');

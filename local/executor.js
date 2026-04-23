@@ -15,10 +15,24 @@ const PROJECT_PATHS = {
   black: '/Users/nathancolestock/black',
 };
 
+// Suite deployment map: project name → Fly.io app name. Used by the deployer
+// when closing the overnight loop. Projects not in this map won't auto-deploy
+// (they're still orchestrated for local work).
+const FLY_DEPLOY_MAP = {
+  comms: 'comms-nc',
+  gloss: 'gloss-nc',
+  black: 'black-hole',
+  scribe: 'scribe-nc',
+  maestro: 'maestro-nc', // deploys the cloud subdirectory
+};
+
 const AUTO_LAUNCH = process.env.AUTO_LAUNCH_SESSIONS !== 'false';
+const AUTO_MERGE_ON_TESTS_PASS = process.env.AUTO_MERGE_ON_TESTS_PASS === 'true';
 
 export function isAutoLaunchEnabled() { return AUTO_LAUNCH; }
+export function isAutoMergeEnabled() { return AUTO_MERGE_ON_TESTS_PASS; }
 export function getProjectPath(name) { return PROJECT_PATHS[name]; }
+export function getFlyApp(name) { return FLY_DEPLOY_MAP[name]; }
 
 function slugify(s) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'set';
@@ -110,7 +124,22 @@ Create a branch named \`${branch}\` and implement all tasks on it. Commit each t
       await cloudApi?.('POST', `/api/worker/${runId}/end`, {
         ended_at: ended, status, summary, cost_usd: cost, duration_ms: durationMs, questions,
       }).catch(() => {});
-      const fsStatus = status === 'done' ? 'done' : status === 'needs_answer' ? 'needs_answer' : 'failed';
+      // When the worker reports 'done' AND the user has opted into full
+      // autonomy (AUTO_MERGE_ON_TESTS_PASS=true), skip the "wait for the
+      // developer to tap merge" step and promote the feature set directly to
+      // merge_requested. The daemon's processMergeRequests loop will re-run
+      // tests, merge, deploy, and auto-revert on failure.
+      let fsStatus;
+      if (status === 'done') {
+        fsStatus = AUTO_MERGE_ON_TESTS_PASS ? 'merge_requested' : 'done';
+        if (AUTO_MERGE_ON_TESTS_PASS) {
+          console.log(`  [auto-merge] ${projectName} feature set #${featureSet.id} → merge_requested (AUTO_MERGE_ON_TESTS_PASS=true)`);
+        }
+      } else if (status === 'needs_answer') {
+        fsStatus = 'needs_answer';
+      } else {
+        fsStatus = 'failed';
+      }
       await cloudApi?.('POST', `/api/feature-sets/${featureSet.id}/status`, {
         status: fsStatus, branch_name: branch,
       }).catch(() => {});
