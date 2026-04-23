@@ -58,6 +58,7 @@ function buildPrompt(task, context, priorQA, projectStats) {
     ``,
     `## Ground rules`,
     `- Work on a new git branch named maestro/<short-slug> so main is untouched.`,
+    `- Branch from the CURRENT origin/main. Never revert, undo, or reverse-merge prior commits on main — especially earlier maestro/* merges from tonight's run. If main has features you didn't write, rebase on top of them; do not remove them.`,
     `- Make focused commits with clear messages.`,
     `- Do not push; do not open PRs. The developer reviews locally.`,
     `- If the scope is larger than one session, do the safest first chunk, commit, and note the rest in tasks.md.`,
