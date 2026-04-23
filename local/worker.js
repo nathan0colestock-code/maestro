@@ -1,0 +1,164 @@
+// Autonomous worker — spawns `claude -p` (headless) in a project dir to actually
+// perform a routed task. Uses existing CLI auth (no API key required).
+
+import { spawn } from 'child_process';
+import { randomUUID } from 'crypto';
+
+const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
+const WORKER_MODEL = process.env.WORKER_MODEL || 'sonnet';
+const MAX_ACTIVE_PER_PROJECT = 1;
+const activeRuns = new Map();
+
+function buildPrompt(task, context, priorQA) {
+  const lines = [
+    `You have been dispatched by Maestro, an orchestration layer that routes the developer's captured ideas to the right project.`,
+    ``,
+    `## Your task`,
+    task,
+  ];
+  if (context) lines.push(``, `## Why this matters`, context);
+
+  if (priorQA?.length) {
+    lines.push(``, `## Previously asked & answered`);
+    for (const qa of priorQA) {
+      lines.push(`Q: ${qa.question}`);
+      lines.push(`A: ${qa.answer}`);
+    }
+    lines.push(``, `Use those answers to proceed. Don't re-ask the same questions.`);
+  }
+
+  lines.push(
+    ``,
+    `## Ground rules`,
+    `- Work on a new git branch named maestro/<short-slug> so main is untouched.`,
+    `- Make focused commits with clear messages.`,
+    `- Do not push; do not open PRs. The developer reviews locally.`,
+    `- If the scope is larger than one session, do the safest first chunk, commit, and note the rest in tasks.md.`,
+    ``,
+    `## If you need more information`,
+    `If the task is ambiguous or you lack info the developer would need to provide,`,
+    `STOP early and at the very end of your final output, emit one or more lines that start with the literal prefix "QUESTION:".`,
+    `Example:`,
+    `  QUESTION: Should the login button go in the top nav or the sidebar?`,
+    `  QUESTION: Do you want the reset to clear all fields or only the form inputs?`,
+    `Maestro will ask the developer via voice and requeue this task with their answers.`,
+    `Only emit QUESTION: lines when you genuinely cannot proceed — never as a courtesy check.`,
+    ``,
+    `## Final output`,
+    `End your session with a one-paragraph plain summary of what you did and what remains, followed by any QUESTION: lines if blocked.`,
+  );
+  return lines.join('\n');
+}
+
+function canStart(projectName) {
+  return (activeRuns.get(projectName) || 0) < MAX_ACTIVE_PER_PROJECT;
+}
+
+function markStart(projectName) {
+  activeRuns.set(projectName, (activeRuns.get(projectName) || 0) + 1);
+}
+
+function markEnd(projectName) {
+  const n = (activeRuns.get(projectName) || 1) - 1;
+  if (n <= 0) activeRuns.delete(projectName);
+  else activeRuns.set(projectName, n);
+}
+
+export function getActiveRunCount(projectName) {
+  return activeRuns.get(projectName) || 0;
+}
+
+export function hasActiveWorker(projectName) {
+  return getActiveRunCount(projectName) > 0;
+}
+
+function parseQuestions(summary) {
+  if (!summary) return [];
+  const out = [];
+  for (const line of summary.split('\n')) {
+    const m = line.match(/^\s*QUESTION:\s*(.+)\s*$/i);
+    if (m) out.push(m[1].trim());
+  }
+  return out;
+}
+
+export function startWorker({ projectName, projectPath, task, context, priorQA, addDirs = [], onStart, onEnd }) {
+  if (!canStart(projectName)) {
+    console.log(`  [worker] ${projectName} already has an active worker — skipping dispatch`);
+    return null;
+  }
+
+  const runId = randomUUID();
+  const sessionId = randomUUID();
+  const prompt = buildPrompt(task, context, priorQA);
+
+  const args = [
+    '-p',
+    '--permission-mode', 'acceptEdits',
+    '--output-format', 'json',
+    '--model', WORKER_MODEL,
+    '--session-id', sessionId,
+  ];
+  if (addDirs.length) args.push('--add-dir', ...addDirs);
+  args.push(
+    '--allowedTools', 'Read,Edit,Write,Bash,Grep,Glob,WebFetch',
+    '--',
+    prompt,
+  );
+
+  console.log(`  [worker] launching claude -p in ${projectPath} (run ${runId.slice(0, 8)})`);
+  markStart(projectName);
+
+  const started = new Date().toISOString();
+  const child = spawn(CLAUDE_BIN, args, {
+    cwd: projectPath,
+    env: { ...process.env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', d => { stdout += d.toString(); });
+  child.stderr.on('data', d => { stderr += d.toString(); });
+
+  Promise.resolve().then(() => onStart?.({ runId, sessionId, projectName, task, started })).catch(() => {});
+
+  child.on('error', err => {
+    markEnd(projectName);
+    console.error(`  [worker] spawn error for ${projectName}:`, err.message);
+    onEnd?.({ runId, sessionId, projectName, ended: new Date().toISOString(), status: 'error', summary: err.message, questions: [] });
+  });
+
+  child.on('exit', code => {
+    markEnd(projectName);
+    const ended = new Date().toISOString();
+    let summary = '';
+    let cost = null;
+    let durationMs = null;
+    let status = code === 0 ? 'done' : 'error';
+
+    try {
+      const parsed = JSON.parse(stdout);
+      summary = parsed.result || parsed.message || stdout.slice(0, 2000);
+      cost = parsed.total_cost_usd ?? null;
+      durationMs = parsed.duration_ms ?? null;
+      if (parsed.is_error) status = 'error';
+    } catch {
+      summary = (stdout || stderr || '').slice(0, 2000);
+    }
+
+    const questions = parseQuestions(summary);
+    if (questions.length) {
+      status = 'needs_answer';
+      console.log(`  [worker] ${projectName} paused — ${questions.length} question(s) for user`);
+    } else {
+      console.log(`  [worker] ${projectName} finished (${status}, exit ${code})`);
+      if (status === 'error' && stderr) {
+        console.error(`  [worker] ${projectName} stderr: ${stderr.slice(0, 500)}`);
+      }
+    }
+    onEnd?.({ runId, sessionId, projectName, ended, status, summary, cost, durationMs, questions });
+  });
+
+  return { runId, sessionId };
+}

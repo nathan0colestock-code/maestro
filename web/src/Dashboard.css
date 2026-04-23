@@ -1,0 +1,195 @@
+.dashboard-screen {
+  padding: 24px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 100%;
+}
+
+.dashboard-header { display: flex; flex-direction: column; gap: 4px; }
+
+.dashboard-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.dashboard-title { font-size: 22px; font-weight: 700; }
+
+.dashboard-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.refresh-btn {
+  font-size: 20px;
+  color: var(--text-muted);
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: color 0.15s;
+}
+.refresh-btn:hover { color: var(--accent); }
+
+.dashboard-subtitle { font-size: 13px; color: var(--text-muted); }
+
+.empty-state {
+  text-align: center;
+  padding: 48px 24px;
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.empty-hint { font-size: 13px; }
+
+.project-list { display: flex; flex-direction: column; gap: 10px; }
+
+.project-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.project-card.active { border-color: var(--active); }
+.project-card:active { opacity: 0.85; }
+
+.project-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.project-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-dot.active {
+  background: var(--active);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.2);
+  animation: breathe 2s infinite;
+}
+.status-dot.idle { background: var(--idle); }
+
+@keyframes breathe {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.2); }
+  50% { box-shadow: 0 0 0 6px rgba(52, 211, 153, 0); }
+}
+
+.project-name { font-size: 16px; font-weight: 600; }
+
+.task-badge {
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 20px;
+}
+
+.worker-badge {
+  background: rgba(251, 191, 36, 0.18);
+  color: #fbbf24;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 20px;
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.worker-status {
+  font-size: 13px;
+  color: #fbbf24;
+  line-height: 1.4;
+}
+
+.worker-run.worker-running { border-left: 2px solid #fbbf24; padding-left: 8px; }
+.worker-run.worker-done { border-left: 2px solid var(--active); padding-left: 8px; }
+.worker-run.worker-error { border-left: 2px solid #f87171; padding-left: 8px; }
+.worker-summary { opacity: 0.85; font-style: normal; }
+
+.expand-icon { font-size: 12px; color: var(--text-muted); }
+
+.project-focus {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.session-status {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.project-details {
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  cursor: default;
+}
+
+.detail-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.detail-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.detail-value {
+  font-size: 13px;
+  color: var(--text);
+  font-family: 'SF Mono', 'Menlo', monospace;
+}
+
+.tasks-section { display: flex; flex-direction: column; gap: 6px; }
+
+.task-list { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+
+.task-item {
+  background: var(--surface2);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.task-text { font-size: 13px; line-height: 1.4; }
+.task-context { font-size: 12px; color: var(--text-muted); font-style: italic; }
+
+.project-description {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
