@@ -81,9 +81,14 @@ app.get('/api/status', auth, (req, res) => {
   ).get().n;
 
   // feature sets that aren't yet terminal
+  // Terminal statuses: done, failed, merged, merged_and_deployed,
+  // deploy_failed_reverted, integration_failed, test_failed, merge_failed
   const openFeatureSets = db.prepare(
     `SELECT COUNT(*) AS n FROM feature_sets
-       WHERE status NOT IN ('done','failed','merged')`
+       WHERE status NOT IN (
+         'done','failed','merged','merged_and_deployed',
+         'deploy_failed_reverted','integration_failed','test_failed','merge_failed'
+       )`
   ).get().n;
 
   // distinct (project, session) pairs actively running or heartbeat in last 5 min
@@ -302,17 +307,37 @@ app.post('/api/feature-sets/:id/merge', auth, (req, res) => {
 });
 
 // POST /api/feature-sets/:id/status — daemon reports state transitions + branch
+//
+// Known status values (not strictly enforced — daemon is trusted):
+//   collecting, queued, running, needs_answer, done, failed,
+//   merge_requested, merged, merge_failed,
+//   test_failed, deploy_failed_reverted, merged_and_deployed, integration_failed
 app.post('/api/feature-sets/:id/status', auth, (req, res) => {
-  const { status, branch_name, run_id } = req.body;
+  const { status, branch_name, run_id, note } = req.body;
   const fields = [], vals = [];
   if (status) {
     fields.push('status = ?'); vals.push(status);
     if (status === 'running') fields.push(`started_at = datetime('now')`);
-    if (status === 'done' || status === 'failed') fields.push(`completed_at = datetime('now')`);
-    if (status === 'merged') fields.push(`merged_at = datetime('now')`);
+    if (status === 'done' || status === 'failed' || status === 'test_failed') {
+      fields.push(`completed_at = datetime('now')`);
+    }
+    if (status === 'merged' || status === 'merged_and_deployed') {
+      fields.push(`merged_at = datetime('now')`);
+    }
+    if (status === 'merged_and_deployed') {
+      fields.push(`deployed_at = datetime('now')`);
+      fields.push(`deploy_status = 'ok'`);
+    }
+    if (status === 'deploy_failed_reverted') {
+      fields.push(`deploy_status = 'reverted'`);
+    }
+    if (status === 'integration_failed') {
+      fields.push(`deploy_status = 'integration_failed'`);
+    }
   }
   if (branch_name) { fields.push('branch_name = ?'); vals.push(branch_name); }
   if (run_id) { fields.push('run_id = ?'); vals.push(run_id); }
+  if (typeof note === 'string') { fields.push('note = ?'); vals.push(note); }
   if (!fields.length) return res.json({ ok: true });
   fields.push(`updated_at = datetime('now')`);
   vals.push(req.params.id);
@@ -327,7 +352,11 @@ app.get('/api/feature-sets/drain', auth, (req, res) => {
   const row = db.prepare(`
     SELECT * FROM feature_sets
     WHERE project_name = ? AND (status = 'queued' OR manual_run = 1)
-      AND status NOT IN ('running','done','failed','merged')
+      AND status NOT IN (
+        'running','done','failed','merged',
+        'merge_requested','merge_failed','test_failed',
+        'merged_and_deployed','deploy_failed_reverted','integration_failed'
+      )
     ORDER BY manual_run DESC, updated_at ASC
     LIMIT 1
   `).get(project);
@@ -534,12 +563,44 @@ app.get('*', (req, res) => {
   res.sendFile(join(__dirname, 'public', 'index.html'));
 });
 
+// Self-scheduled nightly kickoff — backup path in case the local daemon is
+// offline at 23:00 local. The cloud flips any eligible feature sets to
+// 'queued' on its own schedule; the daemon will pick them up on its next
+// poll whenever it comes online. Idempotent: only fires once per server-day.
+//
+// Uses UTC for consistency; user's local schedule is centered on America/Chicago
+// so ~05:00 UTC corresponds to ~midnight Central. Adjust via
+// CLOUD_NIGHTLY_KICKOFF_UTC_HOUR env var if needed.
+const CLOUD_NIGHTLY_KICKOFF_UTC_HOUR = Number(process.env.CLOUD_NIGHTLY_KICKOFF_UTC_HOUR ?? 5);
+let lastCloudKickoff = null; // YYYY-MM-DD string
+function maybeCloudNightlyKickoff() {
+  const now = new Date();
+  if (now.getUTCHours() !== CLOUD_NIGHTLY_KICKOFF_UTC_HOUR) return;
+  const today = now.toISOString().slice(0, 10);
+  if (lastCloudKickoff === today) return;
+  lastCloudKickoff = today;
+  try {
+    const info = db.prepare(
+      `UPDATE feature_sets SET status = 'queued', updated_at = datetime('now')
+       WHERE status = 'collecting' AND (SELECT COUNT(*) FROM tasks WHERE feature_set_id = feature_sets.id) > 0`
+    ).run();
+    if (info.changes > 0) {
+      console.log(`[cloud-nightly] queued ${info.changes} feature set(s) at ${now.toISOString()}`);
+    }
+  } catch (err) {
+    console.error('[cloud-nightly] failed:', err.message);
+  }
+}
+
 // Only auto-start when run directly — tests import this file to get `app`.
 const isDirectRun = import.meta.url === `file://${process.argv[1]}`;
 if (isDirectRun) {
   app.listen(PORT, () => {
     console.log(`Maestro cloud relay running on port ${PORT}`);
+    console.log(`Cloud nightly kickoff: ${CLOUD_NIGHTLY_KICKOFF_UTC_HOUR}:00 UTC`);
   });
+  // Check every 5 min whether we're in the kickoff hour.
+  setInterval(maybeCloudNightlyKickoff, 5 * 60 * 1000);
 }
 
 export default app;
