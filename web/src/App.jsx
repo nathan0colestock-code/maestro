@@ -29,6 +29,21 @@ export default function App() {
     return () => { cancelled = true; clearInterval(t); };
   }, [authed]);
 
+  // Keyboard shortcuts: 1-4 switch tabs (ignored when typing)
+  useEffect(() => {
+    if (!authed) return;
+    function onKey(e) {
+      if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === '1') setTab('capture');
+      else if (e.key === '2') setTab('features');
+      else if (e.key === '3') setTab('answer');
+      else if (e.key === '4') setTab('dashboard');
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [authed]);
+
   if (!authed) return <Login onSuccess={() => setAuthed(true)} />;
 
   function logout() {
@@ -37,49 +52,53 @@ export default function App() {
     setAuthed(false);
   }
 
+  const tabs = [
+    { id: 'capture',   icon: '⬆', label: 'Capture',  shortcut: '1' },
+    { id: 'features',  icon: '✦', label: 'Features', shortcut: '2' },
+    {
+      id: 'answer',
+      icon: '?',
+      label: pendingQuestions > 0 ? `Answer (${pendingQuestions})` : 'Answer',
+      shortcut: '3',
+      badge: pendingQuestions > 0,
+    },
+    { id: 'dashboard', icon: '⊞', label: 'Projects', shortcut: '4' },
+  ];
+
   return (
     <div className="app">
-      <main className="app-content">
-        {tab === 'capture' && <Capture />}
-        {tab === 'features' && <Features />}
-        {tab === 'dashboard' && <Dashboard onLogout={logout} />}
-        {tab === 'answer' && <Answer />}
-      </main>
-
       <nav className="tab-bar">
-        <button
-          className={`tab-btn ${tab === 'capture' ? 'active' : ''}`}
-          onClick={() => setTab('capture')}
-        >
-          <span className="tab-icon">⬆</span>
-          <span className="tab-label">Capture</span>
-        </button>
-        <button
-          className={`tab-btn ${tab === 'features' ? 'active' : ''}`}
-          onClick={() => setTab('features')}
-        >
-          <span className="tab-icon">✦</span>
-          <span className="tab-label">Features</span>
-        </button>
-        <button
-          className={`tab-btn ${tab === 'answer' ? 'active' : ''}`}
-          onClick={() => setTab('answer')}
-        >
-          <span className="tab-icon">
-            ?{pendingQuestions > 0 && <span className="tab-dot" />}
-          </span>
-          <span className="tab-label">
-            Answer{pendingQuestions > 0 ? ` (${pendingQuestions})` : ''}
-          </span>
-        </button>
-        <button
-          className={`tab-btn ${tab === 'dashboard' ? 'active' : ''}`}
-          onClick={() => setTab('dashboard')}
-        >
-          <span className="tab-icon">⊞</span>
-          <span className="tab-label">Projects</span>
-        </button>
+        <div className="sidebar-brand">
+          <span className="sidebar-logo">M</span>
+          <span className="sidebar-name">Maestro</span>
+        </div>
+
+        {tabs.map(({ id, icon, label, shortcut, badge }) => (
+          <button
+            key={id}
+            className={`tab-btn ${tab === id ? 'active' : ''}`}
+            onClick={() => setTab(id)}
+          >
+            <span className="tab-icon">
+              {icon}
+              {badge && <span className="tab-dot" />}
+            </span>
+            <span className="tab-label">{label}</span>
+            <span className="tab-shortcut" aria-hidden="true">{shortcut}</span>
+          </button>
+        ))}
+
+        <div className="sidebar-footer">
+          <button className="sidebar-logout-btn" onClick={logout}>Sign out</button>
+        </div>
       </nav>
+
+      <main className="app-content">
+        {tab === 'capture'   && <Capture />}
+        {tab === 'features'  && <Features />}
+        {tab === 'dashboard' && <Dashboard onLogout={logout} />}
+        {tab === 'answer'    && <Answer />}
+      </main>
     </div>
   );
 }

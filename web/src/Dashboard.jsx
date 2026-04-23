@@ -196,7 +196,7 @@ export default function Dashboard({ onLogout }) {
           <div className="dashboard-actions">
             <button className="refresh-btn" onClick={load} title="Refresh">↻</button>
             {onLogout && (
-              <button className="refresh-btn" onClick={onLogout} title="Sign out">⎋</button>
+              <button className="refresh-btn mobile-logout" onClick={onLogout} title="Sign out">⎋</button>
             )}
           </div>
         </div>
