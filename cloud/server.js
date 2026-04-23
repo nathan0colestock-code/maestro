@@ -54,6 +54,10 @@ app.post('/api/login', (req, res) => {
   return res.status(401).json({ error: 'invalid password' });
 });
 
+// GET /api/health — public liveness (no auth). Every app in the suite
+// exposes this under the same name for uniform monitoring.
+app.get('/api/health', (req, res) => res.json({ ok: true, now: Date.now() }));
+
 // POST /api/capture — iPhone stores a voice/text capture
 app.post('/api/capture', auth, (req, res) => {
   const { text } = req.body;
