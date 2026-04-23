@@ -100,6 +100,17 @@ npm run build            # produces web/dist/ served by cloud/server.js
 
 Auth: `X-Maestro-Password` (legacy) or `Authorization: Bearer <SUITE_API_KEY>` (for inter-suite status polling).
 
+### Self-improving pipeline stats (2026-04)
+
+Every `runMergePipeline` execution records `phase_timings` onto the feature set — per-phase `{ started_at, ended_at, duration_ms, status }`. Aggregate stats (p50, p95, mean, stddev, failure_rate per phase per project, 7-day lookback) are exposed via `GET /api/feature-sets/stats?project=X&days=7` and consumed by maestro itself:
+
+- **Router Gemini prompt** gets a "Historical timing for each project" block — so routing decisions weight how expensive a deploy target is.
+- **Worker prompts** carry "expected test runtime for this project" — so `claude -p` doesn't panic on legitimately slow suites.
+- **Dynamic `WORKER_MAX_MS`** is `max(30 min, p95 × 3)` per-project — fast repos get tight budgets, slow ones get runway.
+- **Regression flags** — if a phase runs >2σ above the 7-day mean (n ≥ 5), the feature set's note includes `regression: <phase> X.Xx slower than usual` so it's visible in the deploy indicator.
+
+This is a **self-improvement signal**, not a user dashboard. The data flows into maestro's own decisions without surfacing a new UI.
+
 ### Pipeline hardening (2026-04)
 
 The overnight loop (`local/daemon.js::runMergePipeline`) now runs all four phases atomically per feature set:
