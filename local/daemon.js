@@ -242,6 +242,25 @@ async function processMergeRequests() {
   }
 }
 
+// Cancel check: poll cloud state and return true if the user has requested
+// a cancel for this feature set. Caller aborts with status='cancelled' and a
+// note naming the phase that was interrupted. Kept read-only so a transient
+// network error doesn't falsely trip the abort.
+async function checkCancel(setId, phaseName) {
+  try {
+    const fresh = await api('GET', `/api/feature-sets/${setId}`);
+    if (fresh && fresh.cancel_requested) {
+      console.log(`[pipeline] cancel requested on #${setId} — aborting before ${phaseName}`);
+      await api('POST', `/api/feature-sets/${setId}/status`, {
+        status: 'cancelled',
+        note: `cancelled before ${phaseName}`,
+      }).catch(() => {});
+      return true;
+    }
+  } catch { /* network flake → assume not cancelled */ }
+  return false;
+}
+
 async function runMergePipeline(set) {
   const projectPath = getProjectPath(set.project_name);
   if (!projectPath || !set.branch_name) return;
@@ -271,6 +290,8 @@ async function runMergePipeline(set) {
     return;
   }
   console.log(`[pipeline] ${set.project_name} tests ${preTest.skipped ? `skipped (${preTest.skipped})` : '✓'}`);
+
+  if (await checkCancel(set.id, 'merge')) return;
 
   // ─── Phase 2: merge to main (primary + extras) ──────────────────────
   let mergeResult;
@@ -308,6 +329,8 @@ async function runMergePipeline(set) {
     }
   }
 
+  if (await checkCancel(set.id, 'deploy')) return;
+
   // ─── Phase 3: deploy each project, health-check, auto-revert on fail ─
   const deployResults = [];
   for (const projectName of allProjects) {
@@ -333,6 +356,8 @@ async function runMergePipeline(set) {
     }).catch(() => {});
     return;
   }
+
+  if (await checkCancel(set.id, 'integration-tests')) return;
 
   // ─── Phase 4: post-deploy integration tests (soft — logged, not blocking) ─
   const integration = await runIntegrationTests().catch(err => ({ ok: false, error: err.message }));

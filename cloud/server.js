@@ -305,6 +305,14 @@ app.post('/api/feature-sets', auth, (req, res) => {
 });
 
 // PATCH /api/feature-sets/:id — update title/description (clarity pass)
+// GET /api/feature-sets/:id — single-row fetch; daemon uses this to poll
+// for the cancel_requested flag between pipeline phases.
+app.get('/api/feature-sets/:id', auth, (req, res) => {
+  const row = db.prepare(`SELECT * FROM feature_sets WHERE id = ?`).get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  res.json(row);
+});
+
 app.patch('/api/feature-sets/:id', auth, (req, res) => {
   const { title, description } = req.body;
   const fields = [], vals = [];
@@ -329,6 +337,19 @@ app.post('/api/feature-sets/:id/run', auth, (req, res) => {
   const row = db.prepare(
     `UPDATE feature_sets SET manual_run = 1, status = 'queued', updated_at = datetime('now') WHERE id = ? RETURNING *`
   ).get(req.params.id);
+  res.json(row);
+});
+
+// POST /api/feature-sets/:id/cancel — set the cancel_requested flag. The
+// daemon's runMergePipeline polls between phases and aborts with a note
+// pointing at the interrupted phase. This does NOT kill the daemon — just
+// asks the current pipeline to stop at the next phase boundary.
+app.post('/api/feature-sets/:id/cancel', auth, (req, res) => {
+  const row = db.prepare(
+    `UPDATE feature_sets SET cancel_requested = 1, updated_at = datetime('now')
+     WHERE id = ? RETURNING *`
+  ).get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'not found' });
   res.json(row);
 });
 
@@ -367,6 +388,12 @@ app.post('/api/feature-sets/:id/status', auth, (req, res) => {
     }
     if (status === 'integration_failed') {
       fields.push(`deploy_status = 'integration_failed'`);
+    }
+    if (status === 'cancelled') {
+      // Clear the cancel flag once the daemon has acknowledged it, so a
+      // re-queued run starts clean.
+      fields.push(`cancel_requested = 0`);
+      fields.push(`completed_at = datetime('now')`);
     }
   }
   if (branch_name) { fields.push('branch_name = ?'); vals.push(branch_name); }
