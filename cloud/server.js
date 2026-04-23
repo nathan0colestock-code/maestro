@@ -2,6 +2,9 @@ import express from 'express';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { timingSafeEqual, createHash } from 'crypto';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import db from './db.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -12,14 +15,44 @@ const PASSWORD = process.env.MAESTRO_PASSWORD;
 const SUITE_API_KEY = process.env.SUITE_API_KEY;
 const START_TIME = Date.now();
 
+// Hash candidates before timing-safe compare so Buffers are always equal-length
+// (avoids length leaks and handles non-ASCII inputs cleanly).
+function safeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const ah = createHash('sha256').update(a).digest();
+  const bh = createHash('sha256').update(b).digest();
+  return timingSafeEqual(ah, bh);
+}
+
 // Read cloud package.json version once at startup
 let PKG_VERSION = 'unknown';
 try {
   PKG_VERSION = JSON.parse(readFileSync(join(__dirname, 'package.json'), 'utf8')).version || 'unknown';
 } catch { /* ignore */ }
 
-app.use(express.json({ limit: '10mb' }));
+app.use(helmet({
+  contentSecurityPolicy: false, // PWA uses inline bootstrap; revisit separately
+}));
+app.use(express.json({ limit: '1mb' }));
 app.use(express.static(join(__dirname, 'public')));
+
+// Pre-auth brute-force protection. Login and capture are the two endpoints
+// anyone on the internet can hit without credentials succeeding; throttle
+// them per-IP.
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'too many attempts' },
+});
+const captureLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'rate limited' },
+});
 
 // Track the most recent daemon poll timestamp (in-memory is fine — it's a
 // liveness heartbeat, not durable state).
@@ -32,25 +65,30 @@ function bearerToken(req) {
 }
 
 function auth(req, res, next) {
-  if (!SECRET && !PASSWORD && !SUITE_API_KEY) return next();
+  // Fail closed: if no credentials are configured, refuse rather than wave
+  // everything through. Previously a missed Fly secret would make the whole
+  // API publicly writable.
+  if (!SECRET && !PASSWORD && !SUITE_API_KEY) {
+    return res.status(503).json({ error: 'auth not configured' });
+  }
   const providedSecret = req.headers['x-maestro-secret'];
   const providedPassword = req.headers['x-maestro-password'];
   const token = bearerToken(req);
-  if (SECRET && providedSecret === SECRET) return next();
-  if (PASSWORD && providedPassword === PASSWORD) return next();
-  if (token && SECRET && token === SECRET) return next();
-  if (token && SUITE_API_KEY && token === SUITE_API_KEY) return next();
+  if (SECRET && providedSecret && safeEqual(providedSecret, SECRET)) return next();
+  if (PASSWORD && providedPassword && safeEqual(providedPassword, PASSWORD)) return next();
+  if (token && SECRET && safeEqual(token, SECRET)) return next();
+  if (token && SUITE_API_KEY && safeEqual(token, SUITE_API_KEY)) return next();
   return res.status(401).json({ error: 'unauthorized' });
 }
 
 // Login verification endpoint — iPhone checks password before storing it.
-// If MAESTRO_PASSWORD is unset, auth is disabled and any submit succeeds
-// (mirrors the auth middleware's no-op behaviour in that case).
-app.post('/api/login', (req, res) => {
-  if (!PASSWORD) return res.json({ ok: true });
+// Fails closed if MAESTRO_PASSWORD is unset so a misconfigured deploy can't
+// accidentally hand out valid sessions.
+app.post('/api/login', loginLimiter, (req, res) => {
+  if (!PASSWORD) return res.status(503).json({ error: 'auth not configured' });
   const { password } = req.body;
   if (!password) return res.status(400).json({ error: 'password required' });
-  if (password === PASSWORD) return res.json({ ok: true });
+  if (safeEqual(password, PASSWORD)) return res.json({ ok: true });
   return res.status(401).json({ error: 'invalid password' });
 });
 
@@ -59,7 +97,7 @@ app.post('/api/login', (req, res) => {
 app.get('/api/health', (req, res) => res.json({ ok: true, now: Date.now() }));
 
 // POST /api/capture — iPhone stores a voice/text capture
-app.post('/api/capture', auth, (req, res) => {
+app.post('/api/capture', captureLimiter, auth, (req, res) => {
   const { text } = req.body;
   if (!text?.trim()) return res.status(400).json({ error: 'text required' });
   const row = db.prepare(
