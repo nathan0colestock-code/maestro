@@ -192,16 +192,21 @@ async function drainFeatureSets() {
   const sessions = sessionsByProject();
 
   // Projects we've committed to a dispatched set in THIS tick. A set with
-  // peers reserves every involved project so the next project's drain in
-  // the same pass can't pick up something that shares a peer (e.g. an
-  // integration set spanning flock+gloss must block gloss's own drain).
+  // peers reserves every involved project so later dispatches in the same
+  // pass can't pick up something that shares a peer.
   const reservedThisTick = new Set();
 
+  // Fetch per-project candidates, then rank so narrow (own-only) sets run
+  // before wide (peer-spanning) ones. Without this, a suite-wide set
+  // (e.g. "remove app switcher from all 7 apps") drawn first blocks every
+  // other project until it finishes — serializing the whole night on one
+  // worker. Running own-only first lets independent projects start
+  // immediately and leaves the peer-heavy set to run on whatever's free.
+  const candidates = [];
   for (const project of cachedProjects) {
     const session = sessions[project.name];
     if (session?.is_active === 1) continue;
     if (hasActiveWorker(project.name)) continue;
-    if (reservedThisTick.has(project.name)) continue;
 
     let set;
     try {
@@ -211,10 +216,18 @@ async function drainFeatureSets() {
 
     const extras = Array.isArray(set.extra_projects) ? set.extra_projects : [];
     const involved = [project.name, ...extras.filter(p => p && p !== project.name)];
+    candidates.push({ project, set, extras, involved });
+  }
 
-    // Peer-busy check: if ANY involved project has an active worker or was
-    // reserved earlier in this tick, defer this set. It stays queued;
-    // next drain tick will retry once the peer frees up.
+  candidates.sort((a, b) => {
+    if (a.involved.length !== b.involved.length) return a.involved.length - b.involved.length;
+    return String(a.set.updated_at).localeCompare(String(b.set.updated_at));
+  });
+
+  for (const { project, set, extras, involved } of candidates) {
+    if (hasActiveWorker(project.name)) continue;
+    if (reservedThisTick.has(project.name)) continue;
+
     const busyPeer = involved.find(p => hasActiveWorker(p) || reservedThisTick.has(p));
     if (busyPeer) {
       console.log(`[drain] ${project.name} feature set #${set.id} deferred — peer ${busyPeer} busy`);
