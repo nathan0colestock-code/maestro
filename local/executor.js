@@ -43,7 +43,7 @@ export async function dispatchTask({
   projectName, projectPath, taskId, text, context,
   priorQA = [], captureId = null,
   sessionStrategy = 'new_session', projectIsActive = false,
-  fileToTasksMd = true, cloudApi,
+  fileToTasksMd = true, cloudApi, projectStats = null,
 }) {
   if (fileToTasksMd) await appendTask(projectPath, text, context);
 
@@ -53,7 +53,7 @@ export async function dispatchTask({
   }
 
   const meta = startWorker({
-    projectName, projectPath, task: text, context, priorQA,
+    projectName, projectPath, task: text, context, priorQA, projectStats,
     onStart: async ({ runId, sessionId, started }) => {
       await cloudApi?.('POST', '/api/worker/start', {
         run_id: runId, session_id: sessionId,
@@ -73,7 +73,7 @@ export async function dispatchTask({
 // Feature-set bundle dispatch — one worker handles all tasks on one branch.
 // For integration sets (extra_projects non-empty) the worker gets --add-dir
 // for each peer project and is instructed to write a shared contract spec first.
-export async function dispatchFeatureSet({ projectName, projectPath, featureSet, cloudApi }) {
+export async function dispatchFeatureSet({ projectName, projectPath, featureSet, cloudApi, projectStats = null }) {
   if (!AUTO_LAUNCH) return { status: 'auto_launch_disabled' };
 
   const branch = `maestro/${slugify(featureSet.title)}`;
@@ -108,7 +108,7 @@ Create a branch named \`${branch}\` and implement all tasks on it. Commit each t
 
   const meta = startWorker({
     projectName, projectPath, task: bundlePrompt, context: null, priorQA: [],
-    addDirs: extraPaths,
+    addDirs: extraPaths, projectStats,
     onStart: async ({ runId, sessionId, started }) => {
       await cloudApi?.('POST', '/api/worker/start', {
         run_id: runId, session_id: sessionId, project_name: projectName,

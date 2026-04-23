@@ -9,7 +9,21 @@ const WORKER_MODEL = process.env.WORKER_MODEL || 'sonnet';
 const MAX_ACTIVE_PER_PROJECT = 1;
 const activeRuns = new Map();
 
-function buildPrompt(task, context, priorQA) {
+function formatProjectTimingNote(projectStats) {
+  if (!projectStats || !Object.keys(projectStats).length) return null;
+  const parts = [];
+  for (const phase of ['pre-merge-tests', 'merge', 'deploy', 'integration-tests']) {
+    const s = projectStats[phase];
+    if (!s || !s.n) continue;
+    const p50s = (s.p50 / 1000).toFixed(1);
+    const p95s = (s.p95 / 1000).toFixed(1);
+    const fr = s.failure_rate != null ? ` fail=${Math.round(s.failure_rate * 100)}%` : '';
+    parts.push(`${phase} p50=${p50s}s p95=${p95s}s${fr} (n=${s.n})`);
+  }
+  return parts.length ? parts.join('; ') : null;
+}
+
+function buildPrompt(task, context, priorQA, projectStats) {
   const lines = [
     `You have been dispatched by Maestro, an orchestration layer that routes the developer's captured ideas to the right project.`,
     ``,
@@ -27,6 +41,7 @@ function buildPrompt(task, context, priorQA) {
     lines.push(``, `Use those answers to proceed. Don't re-ask the same questions.`);
   }
 
+  const timingNote = formatProjectTimingNote(projectStats);
   lines.push(
     ``,
     `## Ground rules`,
@@ -34,6 +49,7 @@ function buildPrompt(task, context, priorQA) {
     `- Make focused commits with clear messages.`,
     `- Do not push; do not open PRs. The developer reviews locally.`,
     `- If the scope is larger than one session, do the safest first chunk, commit, and note the rest in tasks.md.`,
+    ...(timingNote ? [`- Historical timing for this project: ${timingNote}. Factor this into scope judgment — if pre-merge-tests already take minutes, don't introduce changes that add 10x to that.`] : []),
     ``,
     `## Testing is non-negotiable`,
     `- Before each commit, run the project's test command (\`npm test\`, or \`node --test tests/\` if no npm script).`,
@@ -88,7 +104,7 @@ function parseQuestions(summary) {
   return out;
 }
 
-export function startWorker({ projectName, projectPath, task, context, priorQA, addDirs = [], onStart, onEnd }) {
+export function startWorker({ projectName, projectPath, task, context, priorQA, addDirs = [], projectStats, onStart, onEnd }) {
   if (!canStart(projectName)) {
     console.log(`  [worker] ${projectName} already has an active worker — skipping dispatch`);
     return null;
@@ -96,7 +112,7 @@ export function startWorker({ projectName, projectPath, task, context, priorQA, 
 
   const runId = randomUUID();
   const sessionId = randomUUID();
-  const prompt = buildPrompt(task, context, priorQA);
+  const prompt = buildPrompt(task, context, priorQA, projectStats);
 
   const args = [
     '-p',
@@ -124,8 +140,19 @@ export function startWorker({ projectName, projectPath, task, context, priorQA, 
 
   // Wall-clock guard: a stuck `claude -p` would otherwise hold
   // activeRuns[project] indefinitely, blocking every future worker for
-  // that project. Default 60min; override via WORKER_MAX_MS env var.
-  const WORKER_MAX_MS = Number(process.env.WORKER_MAX_MS ?? 60 * 60_000);
+  // that project.
+  //
+  // Dynamic ceiling: if we have pre-merge-tests history for this project,
+  // size the timeout to 3x the observed p95 (clamped to a 30min floor) so
+  // slow-building projects aren't SIGTERMd mid-test while genuinely-stuck
+  // fast projects are still killed fast. Falls back to WORKER_MAX_MS env
+  // var, or 60min if neither is present.
+  const preMergeP95 = projectStats?.['pre-merge-tests']?.p95 || 0;
+  const historyBasedMax = preMergeP95 > 0
+    ? Math.max(30 * 60_000, preMergeP95 * 3)
+    : 0;
+  const envMax = Number(process.env.WORKER_MAX_MS) || 0;
+  const WORKER_MAX_MS = historyBasedMax || envMax || 60 * 60_000;
   let timedOut = false;
   const killTimer = setTimeout(() => {
     timedOut = true;

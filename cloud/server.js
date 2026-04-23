@@ -401,7 +401,7 @@ app.post('/api/feature-sets/:id/merge', auth, (req, res) => {
 //   merge_requested, merged, merge_failed,
 //   test_failed, deploy_failed_reverted, merged_and_deployed, integration_failed
 app.post('/api/feature-sets/:id/status', auth, (req, res) => {
-  const { status, branch_name, run_id, note } = req.body;
+  const { status, branch_name, run_id, note, phase_timings } = req.body;
   const fields = [], vals = [];
   if (status) {
     fields.push('status = ?'); vals.push(status);
@@ -432,6 +432,13 @@ app.post('/api/feature-sets/:id/status', auth, (req, res) => {
   if (branch_name) { fields.push('branch_name = ?'); vals.push(branch_name); }
   if (run_id) { fields.push('run_id = ?'); vals.push(run_id); }
   if (typeof note === 'string') { fields.push('note = ?'); vals.push(note); }
+  if (typeof phase_timings === 'string') {
+    fields.push('phase_timings = ?');
+    vals.push(phase_timings);
+  } else if (phase_timings && typeof phase_timings === 'object') {
+    fields.push('phase_timings = ?');
+    vals.push(JSON.stringify(phase_timings));
+  }
   if (!fields.length) return res.json({ ok: true });
   fields.push(`updated_at = datetime('now')`);
   vals.push(req.params.id);
@@ -468,6 +475,26 @@ app.post('/api/feature-sets/nightly-kickoff', auth, (req, res) => {
      WHERE status = 'collecting' AND (SELECT COUNT(*) FROM tasks WHERE feature_set_id = feature_sets.id) > 0`
   ).run();
   res.json({ queued: info.changes });
+});
+
+// GET /api/feature-sets/stats?project=X&days=N — recent phase_timings for the
+// local daemon's self-improvement loop. Returns the raw rows; aggregation
+// (p50/p95/mean/stddev/failure_rate) happens in local/pipeline-stats.js so
+// the cloud stays a dumb store.
+app.get('/api/feature-sets/stats', auth, (req, res) => {
+  const project = String(req.query.project || '').trim();
+  const days = Math.max(1, Math.min(90, Number(req.query.days) || 7));
+  if (!project) return res.status(400).json({ error: 'project required' });
+  const rows = db.prepare(`
+    SELECT id, project_name, status, phase_timings, updated_at
+    FROM feature_sets
+    WHERE project_name = ?
+      AND phase_timings IS NOT NULL
+      AND updated_at >= datetime('now', ? )
+    ORDER BY updated_at DESC
+    LIMIT 500
+  `).all(project, `-${days} days`);
+  res.json({ rows });
 });
 
 // GET /api/feature-sets/merge-requested — daemon polls for user-approved merges

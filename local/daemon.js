@@ -6,6 +6,7 @@ import { hasActiveWorker } from './worker.js';
 import { synthesizeProject, clarifyFeatureSet } from './synthesis.js';
 import { deployProject } from './deployer.js';
 import { runProjectTests, runIntegrationTests, checkoutBranch, branchExists } from './test-runner.js';
+import { getProjectStats, detectRegression } from './pipeline-stats.js';
 import { readFile } from 'fs/promises';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
@@ -139,13 +140,15 @@ async function drainLegacyTasks() {
     try { priorQA = await api('GET', `/api/tasks/${nextTask.id}/qa`); } catch {}
 
     console.log(`[drain-legacy] ${project.name} task #${nextTask.id}${priorQA.length ? ` (+${priorQA.length} answers)` : ''}`);
+    let projectStats = null;
+    try { projectStats = await getProjectStats(project.name, { lookback_days: 7 }); } catch {}
     try {
       await dispatchTask({
         projectName: project.name, projectPath,
         taskId: nextTask.id, text: nextTask.text, context: nextTask.context,
         priorQA, captureId: nextTask.capture_id,
         sessionStrategy: 'new_session', projectIsActive: false,
-        fileToTasksMd: false, cloudApi: api,
+        fileToTasksMd: false, cloudApi: api, projectStats,
       });
     } catch (err) {
       console.error(`[drain-legacy] ${project.name} dispatch failed:`, err.message);
@@ -203,10 +206,12 @@ async function drainFeatureSets() {
     if (!projectPath) continue;
 
     console.log(`[drain] ${project.name} → feature set #${set.id} "${set.title}" (${set.tasks.length} task(s))`);
+    let projectStats = null;
+    try { projectStats = await getProjectStats(project.name, { lookback_days: 7 }); } catch {}
     try {
       await dispatchFeatureSet({
         projectName: project.name, projectPath,
-        featureSet: set, cloudApi: api,
+        featureSet: set, cloudApi: api, projectStats,
       });
     } catch (err) {
       console.error(`[drain] ${project.name} dispatch failed:`, err.message);
@@ -270,12 +275,48 @@ async function runMergePipeline(set) {
   const allProjects = [set.project_name, ...extras];
   const scope = extras.length ? `${set.project_name}+${extras.join(',')}` : set.project_name;
 
+  // Self-improvement signal: every phase emits { phase, started_at,
+  // ended_at, duration_ms, status }. Persisted on the terminal status
+  // update so pipeline-stats can aggregate across runs.
+  const timings = [];
+  // Pre-load project stats once so each phase end can cheaply check for
+  // regressions without round-tripping to the cloud for every transition.
+  let projectStats = {};
+  try { projectStats = await getProjectStats(set.project_name, { lookback_days: 7 }); }
+  catch { /* stats are advisory; silent failure is OK */ }
+  const regressionNotes = [];
+
+  const recordPhase = async (phase, startedAt, status) => {
+    const endedAt = Date.now();
+    const duration_ms = endedAt - startedAt;
+    const entry = {
+      phase,
+      started_at: new Date(startedAt).toISOString(),
+      ended_at: new Date(endedAt).toISOString(),
+      duration_ms,
+      status,
+    };
+    timings.push(entry);
+    if (status === 'ok') {
+      const reg = detectRegression(phase, duration_ms, projectStats);
+      if (reg.is_regression) {
+        regressionNotes.push(reg.note);
+        // Soft-surface the regression on the feature_set note immediately
+        // so the pipeline is observable even if it later succeeds.
+        await api('POST', `/api/feature-sets/${set.id}/status`, {
+          note: regressionNotes.join('; '),
+        }).catch(() => {});
+      }
+    }
+  };
+
   // ─── Phase 1: pre-merge tests on the feature branch ──────────────────
   // Test the primary project AND every extra that actually carries the
   // same branch name. An integration set where the primary is gloss but
   // the branch also exists in comms used to ship with comms tests never
   // running — now a red peer fails the pipeline before any merge happens.
   console.log(`[pipeline] ${scope} branch ${set.branch_name} — running pre-merge tests across ${allProjects.length} project(s)`);
+  const preMergeStart = Date.now();
   for (const projectName of allProjects) {
     const path = getProjectPath(projectName);
     if (!path) continue;
@@ -284,8 +325,10 @@ async function runMergePipeline(set) {
       // Extra projects may be listed for context but not participate — skip.
       if (projectName === set.project_name) {
         console.error(`[pipeline] primary ${projectName} missing branch ${set.branch_name}`);
+        await recordPhase('pre-merge-tests', preMergeStart, 'failed');
         await api('POST', `/api/feature-sets/${set.id}/status`, {
           status: 'merge_failed', note: `primary project ${projectName} has no branch ${set.branch_name}`,
+          phase_timings: JSON.stringify(timings),
         }).catch(() => {});
         return;
       }
@@ -295,8 +338,10 @@ async function runMergePipeline(set) {
     const checkout = await checkoutBranch(path, set.branch_name);
     if (!checkout.ok) {
       console.error(`[pipeline] checkout failed on ${projectName}: ${checkout.error}`);
+      await recordPhase('pre-merge-tests', preMergeStart, 'failed');
       await api('POST', `/api/feature-sets/${set.id}/status`, {
         status: 'merge_failed', note: `checkout failed on ${projectName}: ${checkout.error}`,
+        phase_timings: JSON.stringify(timings),
       }).catch(() => {});
       return;
     }
@@ -304,18 +349,22 @@ async function runMergePipeline(set) {
     await checkout.restore();
     if (!preTest.ok) {
       console.error(`[pipeline] ${projectName} tests failed — not merging`);
+      await recordPhase('pre-merge-tests', preMergeStart, 'failed');
       await api('POST', `/api/feature-sets/${set.id}/status`, {
         status: 'test_failed',
         note: `${projectName}: ${(preTest.stderr || preTest.error || '').slice(0, 1800)}`,
+        phase_timings: JSON.stringify(timings),
       }).catch(() => {});
       return;
     }
     console.log(`[pipeline] ${projectName} tests ${preTest.skipped ? `skipped (${preTest.skipped})` : '✓'}`);
   }
+  await recordPhase('pre-merge-tests', preMergeStart, 'ok');
 
   if (await checkCancel(set.id, 'merge')) return;
 
   // ─── Phase 2: merge to main (primary + extras) ──────────────────────
+  const mergeStart = Date.now();
   let mergeResult;
   try {
     mergeResult = await mergeFeatureSet({
@@ -323,15 +372,19 @@ async function runMergePipeline(set) {
     });
   } catch (err) {
     console.error(`[pipeline] merge error on ${set.project_name}:`, err.message);
+    await recordPhase('merge', mergeStart, 'failed');
     await api('POST', `/api/feature-sets/${set.id}/status`, {
       status: 'merge_failed', note: err.message,
+      phase_timings: JSON.stringify(timings),
     }).catch(() => {});
     return;
   }
   if (!mergeResult.ok) {
     console.error(`[pipeline] merge failed: ${mergeResult.error}`);
+    await recordPhase('merge', mergeStart, 'failed');
     await api('POST', `/api/feature-sets/${set.id}/status`, {
       status: 'merge_failed', note: mergeResult.error,
+      phase_timings: JSON.stringify(timings),
     }).catch(() => {});
     return;
   }
@@ -351,6 +404,7 @@ async function runMergePipeline(set) {
       console.warn(`[pipeline] push failed for ${repoPath}: ${err.message} (continuing — fly deploys from local)`);
     }
   }
+  await recordPhase('merge', mergeStart, 'ok');
 
   if (await checkCancel(set.id, 'deploy')) return;
 
@@ -358,6 +412,7 @@ async function runMergePipeline(set) {
   // If any deploy fails, we roll back EVERY already-successful sibling too.
   // Previous behavior left early-in-the-list projects live against a
   // reverted later-in-the-list project — quietly inconsistent prod.
+  const deployStart = Date.now();
   const deployResults = [];
   for (const projectName of allProjects) {
     const r = await deployProject(projectName);
@@ -370,6 +425,7 @@ async function runMergePipeline(set) {
 
   const anyDeployFailed = deployResults.some(r => !r.ok && !r.skipped);
   if (anyDeployFailed) {
+    await recordPhase('deploy', deployStart, 'failed');
     // Roll back every sibling that *did* deploy+health-check OK earlier
     // in the loop. Use dynamic import so this file stays aligned with the
     // existing import at the top; undeployProject is the new helper.
@@ -395,32 +451,41 @@ async function runMergePipeline(set) {
           post_revert_healthy: r.post_revert_healthy,
         })),
       }).slice(0, 4000),
+      phase_timings: JSON.stringify(timings),
     }).catch(() => {});
     return;
   }
+  await recordPhase('deploy', deployStart, 'ok');
 
   if (await checkCancel(set.id, 'integration-tests')) return;
 
   // ─── Phase 4: post-deploy integration tests (soft — logged, not blocking) ─
+  const integrationStart = Date.now();
   const integration = await runIntegrationTests().catch(err => ({ ok: false, error: err.message }));
   if (!integration.ok) {
     console.warn(`[pipeline] integration tests failed post-deploy — surfacing`);
+    await recordPhase('integration-tests', integrationStart, 'failed');
     await api('POST', `/api/feature-sets/${set.id}/status`, {
       status: 'integration_failed',
       note: ((integration.stderr || '') + '\n' + (integration.stdout || '')).slice(0, 3000),
+      phase_timings: JSON.stringify(timings),
     }).catch(() => {});
     return;
   }
+  await recordPhase('integration-tests', integrationStart, 'ok');
 
   // ─── Success: merged + deployed + integration-tested ─────────────────
   console.log(`[pipeline] ✓ ${scope} merged_and_deployed`);
+  const successNote = JSON.stringify({
+    deployed: deployResults.filter(r => r.ok && !r.skipped).map(r => ({
+      project: r.projectName, flyApp: r.flyApp, at: r.deployedAt,
+    })),
+    ...(regressionNotes.length ? { regressions: regressionNotes } : {}),
+  });
   await api('POST', `/api/feature-sets/${set.id}/status`, {
     status: 'merged_and_deployed',
-    note: JSON.stringify({
-      deployed: deployResults.filter(r => r.ok && !r.skipped).map(r => ({
-        project: r.projectName, flyApp: r.flyApp, at: r.deployedAt,
-      })),
-    }),
+    note: successNote,
+    phase_timings: JSON.stringify(timings),
   }).catch(() => {});
 }
 
