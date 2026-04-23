@@ -81,14 +81,50 @@ function auth(req, res, next) {
   return res.status(401).json({ error: 'unauthorized' });
 }
 
+// ── Login rate limit ────────────────────────────────────────────────────────
+// In-memory sliding window; 5 attempts / 15 minutes per IP. Matches the
+// pattern in comms/black/scribe. Single-user app — process restart clears
+// the counter, which is acceptable.
+const LOGIN_RATE = new Map();
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 5;
+function loginRateLimit(req, res, next) {
+  const key = req.ip || req.socket?.remoteAddress || 'unknown';
+  const now = Date.now();
+  const rec = LOGIN_RATE.get(key);
+  if (rec && now - rec.firstAttemptAt > LOGIN_WINDOW_MS) LOGIN_RATE.delete(key);
+  const cur = LOGIN_RATE.get(key);
+  if (cur && cur.count >= LOGIN_MAX_ATTEMPTS) {
+    const retry = Math.ceil((cur.firstAttemptAt + LOGIN_WINDOW_MS - now) / 1000);
+    res.set('Retry-After', String(Math.max(retry, 1)));
+    return res.status(429).json({ error: 'too many attempts' });
+  }
+  if (LOGIN_RATE.size > 1000) {
+    for (const [k, v] of LOGIN_RATE) {
+      if (now - v.firstAttemptAt > LOGIN_WINDOW_MS) LOGIN_RATE.delete(k);
+    }
+  }
+  next();
+}
+function recordLoginAttempt(req) {
+  const key = req.ip || req.socket?.remoteAddress || 'unknown';
+  const cur = LOGIN_RATE.get(key);
+  if (cur) cur.count += 1;
+  else LOGIN_RATE.set(key, { count: 1, firstAttemptAt: Date.now() });
+}
+
 // Login verification endpoint — iPhone checks password before storing it.
 // Fails closed if MAESTRO_PASSWORD is unset so a misconfigured deploy can't
-// accidentally hand out valid sessions.
-app.post('/api/login', loginLimiter, (req, res) => {
+// accidentally hand out valid sessions. Uses express-rate-limit (loginLimiter)
+// for window-based throttling AND records each failed attempt into the inline
+// counter (LOGIN_RATE) so only bad-password attempts consume the stricter
+// 5-in-15-min quota — good credentials don't spend from it.
+app.post('/api/login', loginLimiter, loginRateLimit, (req, res) => {
   if (!PASSWORD) return res.status(503).json({ error: 'auth not configured' });
   const { password } = req.body;
   if (!password) return res.status(400).json({ error: 'password required' });
   if (safeEqual(password, PASSWORD)) return res.json({ ok: true });
+  recordLoginAttempt(req);
   return res.status(401).json({ error: 'invalid password' });
 });
 
@@ -406,7 +442,7 @@ app.post('/api/feature-sets/:id/merge', auth, (req, res) => {
 //   merge_requested, merged, merge_failed,
 //   test_failed, deploy_failed_reverted, merged_and_deployed, integration_failed
 app.post('/api/feature-sets/:id/status', auth, (req, res) => {
-  const { status, branch_name, run_id, note } = req.body;
+  const { status, branch_name, run_id, note, phase_timings } = req.body;
   const fields = [], vals = [];
   if (status) {
     fields.push('status = ?'); vals.push(status);
@@ -437,6 +473,13 @@ app.post('/api/feature-sets/:id/status', auth, (req, res) => {
   if (branch_name) { fields.push('branch_name = ?'); vals.push(branch_name); }
   if (run_id) { fields.push('run_id = ?'); vals.push(run_id); }
   if (typeof note === 'string') { fields.push('note = ?'); vals.push(note); }
+  if (typeof phase_timings === 'string') {
+    fields.push('phase_timings = ?');
+    vals.push(phase_timings);
+  } else if (phase_timings && typeof phase_timings === 'object') {
+    fields.push('phase_timings = ?');
+    vals.push(JSON.stringify(phase_timings));
+  }
   if (!fields.length) return res.json({ ok: true });
   fields.push(`updated_at = datetime('now')`);
   vals.push(req.params.id);
@@ -473,6 +516,26 @@ app.post('/api/feature-sets/nightly-kickoff', auth, (req, res) => {
      WHERE status = 'collecting' AND (SELECT COUNT(*) FROM tasks WHERE feature_set_id = feature_sets.id) > 0`
   ).run();
   res.json({ queued: info.changes });
+});
+
+// GET /api/feature-sets/stats?project=X&days=N — recent phase_timings for the
+// local daemon's self-improvement loop. Returns the raw rows; aggregation
+// (p50/p95/mean/stddev/failure_rate) happens in local/pipeline-stats.js so
+// the cloud stays a dumb store.
+app.get('/api/feature-sets/stats', auth, (req, res) => {
+  const project = String(req.query.project || '').trim();
+  const days = Math.max(1, Math.min(90, Number(req.query.days) || 7));
+  if (!project) return res.status(400).json({ error: 'project required' });
+  const rows = db.prepare(`
+    SELECT id, project_name, status, phase_timings, updated_at
+    FROM feature_sets
+    WHERE project_name = ?
+      AND phase_timings IS NOT NULL
+      AND updated_at >= datetime('now', ? )
+    ORDER BY updated_at DESC
+    LIMIT 500
+  `).all(project, `-${days} days`);
+  res.json({ rows });
 });
 
 // GET /api/feature-sets/merge-requested — daemon polls for user-approved merges

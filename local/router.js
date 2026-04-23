@@ -2,6 +2,7 @@ import { GoogleGenAI } from '@google/genai';
 import { readFile } from 'fs/promises';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
+import { getProjectStats } from './pipeline-stats.js';
 
 const genai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const ROUTER_MODEL = 'gemini-2.5-flash';
@@ -26,7 +27,20 @@ function formatAge(isoString) {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-function buildSystemPrompt(projects, sessions, openFeatureSets) {
+function formatTimingLine(project, stats) {
+  if (!stats || !Object.keys(stats).length) return `${project}: (no recent pipeline history)`;
+  const parts = [];
+  for (const phase of ['pre-merge-tests', 'merge', 'deploy', 'integration-tests']) {
+    const s = stats[phase];
+    if (!s || !s.n) continue;
+    const p50s = (s.p50 / 1000).toFixed(1);
+    const p95s = (s.p95 / 1000).toFixed(1);
+    parts.push(`${phase} p50=${p50s}s p95=${p95s}s (n=${s.n})`);
+  }
+  return parts.length ? `${project}: ${parts.join('; ')}` : `${project}: (no recent pipeline history)`;
+}
+
+function buildSystemPrompt(projects, sessions, openFeatureSets, projectStatsByName = {}) {
   const sessionsByProject = {};
   for (const s of sessions) sessionsByProject[s.project_name] = s;
 
@@ -91,7 +105,13 @@ Respond ONLY with valid JSON matching this schema:
   ]
 }
 
-For "task" action exactly one of feature_set_id or new_feature_set must be non-null. For "note"/"doc", both should be null. When is_integration=true, integration_projects must be non-empty.${SUITE_SYSTEM_CONTEXT ? `
+For "task" action exactly one of feature_set_id or new_feature_set must be non-null. For "note"/"doc", both should be null. When is_integration=true, integration_projects must be non-empty.
+
+## Historical timing for each project
+
+Recent pipeline timings (last 7 days). A project whose deploy p95 is minutes long is a higher-risk merge target than one whose p95 is seconds; weight that into how aggressively you batch tasks into the same feature set.
+
+${projects.map(p => formatTimingLine(p.name, projectStatsByName[p.name])).join('\n')}${SUITE_SYSTEM_CONTEXT ? `
 
 ---
 
@@ -101,7 +121,14 @@ ${SUITE_SYSTEM_CONTEXT}` : ''}`;
 }
 
 export async function routeCapture(captureText, projects, sessions, openFeatureSets = []) {
-  const systemInstruction = buildSystemPrompt(projects, sessions, openFeatureSets);
+  // Pull stats for every project in parallel. getProjectStats is cached
+  // (10 min TTL) so rapid capture bursts don't hammer the cloud.
+  const statsPairs = await Promise.all(projects.map(async p => {
+    try { return [p.name, await getProjectStats(p.name, { lookback_days: 7 })]; }
+    catch { return [p.name, {}]; }
+  }));
+  const projectStatsByName = Object.fromEntries(statsPairs);
+  const systemInstruction = buildSystemPrompt(projects, sessions, openFeatureSets, projectStatsByName);
 
   const response = await genai.models.generateContent({
     model: ROUTER_MODEL,

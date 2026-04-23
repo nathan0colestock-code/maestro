@@ -128,5 +128,10 @@ safeMigrate('ALTER TABLE feature_sets ADD COLUMN deploy_status TEXT');
 // User-initiated cancel flag — daemon checks between pipeline phases and
 // aborts if set, leaving a note pointing at the interrupted phase.
 safeMigrate('ALTER TABLE feature_sets ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0');
+// Pipeline phase timings captured during runMergePipeline. Stored as a JSON
+// array of { phase, started_at, ended_at, duration_ms, status } — feeds the
+// self-improvement loop (router + worker prompts, dynamic WORKER_MAX_MS,
+// regression flagging). TEXT (not JSON type) for broad sqlite compat.
+safeMigrate('ALTER TABLE feature_sets ADD COLUMN phase_timings TEXT');
 
 export default db;
