@@ -1,0 +1,9 @@
+{
+  "name": "maestro",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --test --test-reporter=spec tests/*.test.mjs"
+  }
+}
