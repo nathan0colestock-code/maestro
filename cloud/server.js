@@ -604,12 +604,13 @@ app.get('/api/reflect/observations', auth, (req, res) => {
   ).all();
 
   const captures = db.prepare(
-    `SELECT id, text, source, processed, routing_json, created_at
+    `SELECT id, text, source, processed_at, routing_json, created_at
      FROM captures
      WHERE created_at >= ${since}
      ORDER BY created_at DESC`
   ).all().map(c => ({
     ...c,
+    processed: c.processed_at != null,
     routing_json: c.routing_json ? (() => { try { return JSON.parse(c.routing_json); } catch { return null; } })() : null,
   }));
 

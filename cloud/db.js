@@ -138,5 +138,10 @@ safeMigrate('ALTER TABLE feature_sets ADD COLUMN phase_timings TEXT');
 // rows read back as NULL.
 safeMigrate('ALTER TABLE worker_runs ADD COLUMN tokens_in INTEGER');
 safeMigrate('ALTER TABLE worker_runs ADD COLUMN tokens_out INTEGER');
+// Where did this capture come from? 'user' (voice/text via PWA), 'reflector'
+// (nightly self-improvement), future ingestors can pick their own tag.
+// The reflector sets source='reflector' so its self-proposed captures can
+// be filtered out of day-time dashboards if desired.
+safeMigrate('ALTER TABLE captures ADD COLUMN source TEXT');
 
 export default db;
