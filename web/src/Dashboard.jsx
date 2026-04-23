@@ -13,6 +13,29 @@ function formatAge(isoString) {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+// Map the pipeline's last_deploy_status to a visible dot on the project card.
+// The daemon produces these terminal statuses on merged feature sets — green
+// means prod is healthy with the latest code; any other colour means the
+// overnight loop flagged a problem the developer needs to review.
+function deployBadge(project) {
+  const status = project.last_deploy_status;
+  if (!status) return null;
+  const labels = {
+    ok: { cls: 'deploy-ok', symbol: '●', title: 'Deploy healthy' },
+    reverted: { cls: 'deploy-reverted', symbol: '⚠', title: 'Deploy rolled back — prod is on previous good release' },
+    integration_failed: { cls: 'deploy-warn', symbol: '⚠', title: 'Deployed but integration tests failed' },
+    test_failed: { cls: 'deploy-bad', symbol: '✕', title: 'Pre-merge tests failed — not deployed' },
+    merge_failed: { cls: 'deploy-bad', symbol: '✕', title: 'Merge conflict — not deployed' },
+  };
+  const b = labels[status];
+  if (!b) return null;
+  return (
+    <span className={`deploy-dot ${b.cls}`} title={`${b.title} · ${formatAge(project.last_deploy_at)}`}>
+      {b.symbol}
+    </span>
+  );
+}
+
 function ProjectCard({ project, expanded, onToggle }) {
   const session = project.session;
   const isActive = session?.is_active === 1;
@@ -26,6 +49,7 @@ function ProjectCard({ project, expanded, onToggle }) {
         <div className="project-name-row">
           <span className={`status-dot ${isActive ? 'active' : 'idle'}`} />
           <span className="project-name">{project.name}</span>
+          {deployBadge(project)}
           {project.open_task_count > 0 && (
             <span className="task-badge">{project.open_task_count}</span>
           )}
@@ -58,6 +82,25 @@ function ProjectCard({ project, expanded, onToggle }) {
 
       {expanded && (
         <div className="project-details" onClick={e => e.stopPropagation()}>
+          {project.last_deploy_at && (
+            <div className="detail-row">
+              <span className="detail-label">Last deploy</span>
+              <span className="detail-value">
+                {project.last_deploy_status === 'ok' ? '✓ healthy' : `⚠ ${project.last_deploy_status}`}
+                {' · '}
+                {formatAge(project.last_deploy_at)}
+              </span>
+            </div>
+          )}
+          {project.last_deploy_note && project.last_deploy_status !== 'ok' && (
+            <div className="detail-row">
+              <span className="detail-label">Deploy note</span>
+              <span className="detail-value" style={{ whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '11px' }}>
+                {project.last_deploy_note.slice(0, 400)}
+                {project.last_deploy_note.length > 400 ? '…' : ''}
+              </span>
+            </div>
+          )}
           {project.last_commit && (
             <div className="detail-row">
               <span className="detail-label">Last commit</span>
