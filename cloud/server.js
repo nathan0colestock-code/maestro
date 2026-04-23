@@ -21,11 +21,14 @@ function auth(req, res, next) {
   return res.status(401).json({ error: 'unauthorized' });
 }
 
-// Login verification endpoint — iPhone checks password before storing it
+// Login verification endpoint — iPhone checks password before storing it.
+// If MAESTRO_PASSWORD is unset, auth is disabled and any submit succeeds
+// (mirrors the auth middleware's no-op behaviour in that case).
 app.post('/api/login', (req, res) => {
+  if (!PASSWORD) return res.json({ ok: true });
   const { password } = req.body;
   if (!password) return res.status(400).json({ error: 'password required' });
-  if (PASSWORD && password === PASSWORD) return res.json({ ok: true });
+  if (password === PASSWORD) return res.json({ ok: true });
   return res.status(401).json({ error: 'invalid password' });
 });
 
