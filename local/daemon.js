@@ -1,0 +1,337 @@
+import { scanProjects } from './project-scanner.js';
+import { readSessions } from './session-reader.js';
+import { routeCapture } from './router.js';
+import { executeRoutingPlan, dispatchTask, dispatchFeatureSet, mergeFeatureSet, getProjectPath, isAutoLaunchEnabled } from './executor.js';
+import { hasActiveWorker } from './worker.js';
+import { synthesizeProject, clarifyFeatureSet } from './synthesis.js';
+
+const CLOUD_URL = process.env.MAESTRO_CLOUD_URL || 'http://localhost:3750';
+const SECRET = process.env.MAESTRO_SECRET || '';
+const POLL_INTERVAL_MS = 30_000;
+const FULL_SCAN_INTERVAL_MS = 5 * 60_000;
+const SYNTHESIS_INTERVAL_MS = 30 * 60_000;
+const CLARITY_INTERVAL_MS = 10 * 60_000;
+const NIGHTLY_KICKOFF_HOUR = Number(process.env.NIGHTLY_KICKOFF_HOUR ?? 23);
+const NIGHTLY_CATCHUP_CUTOFF_HOUR = Number(process.env.NIGHTLY_CATCHUP_CUTOFF_HOUR ?? 7);
+
+let cachedProjects = [];
+let cachedSessions = [];
+let lastFullScan = 0;
+let lastSynthesis = 0;
+let lastClarity = 0;
+let lastNightlyKickoff = null; // YYYY-MM-DD string of last fire
+
+function headers() {
+  return {
+    'Content-Type': 'application/json',
+    ...(SECRET ? { 'X-Maestro-Secret': SECRET } : {}),
+  };
+}
+
+async function api(method, path, body) {
+  const res = await fetch(`${CLOUD_URL}${path}`, {
+    method,
+    headers: headers(),
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`API ${method} ${path} → ${res.status}: ${text}`);
+  }
+  return res.json();
+}
+
+async function fullScan() {
+  console.log('[scan] Reading projects and sessions...');
+  cachedProjects = await scanProjects();
+  cachedSessions = await readSessions();
+  lastFullScan = Date.now();
+
+  await api('POST', '/api/state', {
+    projects: cachedProjects,
+    sessions: cachedSessions,
+  });
+
+  const activeCount = cachedSessions.filter(s => s.is_active).length;
+  console.log(`[scan] ${cachedProjects.length} projects, ${activeCount} active Claude sessions`);
+}
+
+async function quickSessionScan() {
+  cachedSessions = await readSessions();
+}
+
+function sessionsByProject() {
+  return Object.fromEntries(cachedSessions.map(s => [s.project_name, s]));
+}
+
+async function openFeatureSets() {
+  try {
+    const sets = await api('GET', '/api/feature-sets');
+    return sets
+      .filter(s => s.status === 'collecting' || s.status === 'queued')
+      .map(s => ({
+        id: s.id,
+        project_name: s.project_name,
+        title: s.title,
+        description: s.description,
+        task_count: (s.tasks || []).length,
+      }));
+  } catch { return []; }
+}
+
+async function processQueue() {
+  const queue = await api('GET', '/api/queue');
+  if (!queue.length) return;
+
+  console.log(`[queue] ${queue.length} capture(s) to process`);
+  const openSets = await openFeatureSets();
+
+  for (const capture of queue) {
+    console.log(`[route] "${capture.text.slice(0, 80)}${capture.text.length > 80 ? '…' : ''}"`);
+
+    try {
+      const routingPlan = await routeCapture(capture.text, cachedProjects, cachedSessions, openSets);
+      const results = await executeRoutingPlan(routingPlan, capture.id, {
+        cloudApi: api,
+        sessionsByProject: sessionsByProject(),
+      });
+
+      await api('POST', `/api/queue/${capture.id}/ack`, {
+        routing_json: { plan: routingPlan, results },
+      });
+    } catch (err) {
+      console.error(`[route] Error processing capture ${capture.id}:`, err.message);
+    }
+  }
+}
+
+// Legacy drain: any pending tasks with no feature_set_id (pre-feature-set era)
+// keep running the old one-task-per-worker flow so in-flight work completes.
+async function drainLegacyTasks() {
+  if (!isAutoLaunchEnabled()) return;
+  const sessions = sessionsByProject();
+
+  for (const project of cachedProjects) {
+    const session = sessions[project.name];
+    if (session?.is_active === 1) continue;
+    if (hasActiveWorker(project.name)) continue;
+
+    let nextTask;
+    try {
+      nextTask = await api('GET', `/api/tasks/drain?project=${encodeURIComponent(project.name)}`);
+    } catch (err) { continue; }
+    if (!nextTask || nextTask.feature_set_id) continue;
+
+    const projectPath = getProjectPath(project.name);
+    if (!projectPath) continue;
+
+    let priorQA = [];
+    try { priorQA = await api('GET', `/api/tasks/${nextTask.id}/qa`); } catch {}
+
+    console.log(`[drain-legacy] ${project.name} task #${nextTask.id}${priorQA.length ? ` (+${priorQA.length} answers)` : ''}`);
+    try {
+      await dispatchTask({
+        projectName: project.name, projectPath,
+        taskId: nextTask.id, text: nextTask.text, context: nextTask.context,
+        priorQA, captureId: nextTask.capture_id,
+        sessionStrategy: 'new_session', projectIsActive: false,
+        fileToTasksMd: false, cloudApi: api,
+      });
+    } catch (err) {
+      console.error(`[drain-legacy] ${project.name} dispatch failed:`, err.message);
+    }
+  }
+}
+
+// Returns a key identifying the current overnight window: the calendar date of
+// the 23:00 that started it. 01:30 Mon → "Sun" (Sunday night's window).
+function overnightWindowKey(now) {
+  const d = new Date(now);
+  if (d.getHours() < NIGHTLY_KICKOFF_HOUR) d.setDate(d.getDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
+// Fire the kickoff whenever we're inside the overnight window (23:00 → catchup cutoff,
+// default 07:00) and haven't already kicked off for that window. This means opening
+// the laptop at 6am after sleeping through 11pm still catches last night's work —
+// while opening at 9am waits for tonight.
+async function maybeNightlyKickoff() {
+  const now = new Date();
+  const hour = now.getHours();
+  const inWindow = hour >= NIGHTLY_KICKOFF_HOUR || hour < NIGHTLY_CATCHUP_CUTOFF_HOUR;
+  if (!inWindow) return;
+
+  const key = overnightWindowKey(now);
+  if (lastNightlyKickoff === key) return;
+
+  try {
+    const res = await api('POST', '/api/feature-sets/nightly-kickoff');
+    const label = hour >= NIGHTLY_KICKOFF_HOUR ? 'on-time' : 'catchup';
+    console.log(`[nightly] ${label} kickoff — ${res.queued} feature set(s) queued at ${now.toTimeString().slice(0, 5)}`);
+    lastNightlyKickoff = key;
+  } catch (err) {
+    console.error('[nightly] kickoff failed:', err.message);
+  }
+}
+
+async function drainFeatureSets() {
+  if (!isAutoLaunchEnabled()) return;
+  const sessions = sessionsByProject();
+
+  for (const project of cachedProjects) {
+    const session = sessions[project.name];
+    if (session?.is_active === 1) continue;
+    if (hasActiveWorker(project.name)) continue;
+
+    let set;
+    try {
+      set = await api('GET', `/api/feature-sets/drain?project=${encodeURIComponent(project.name)}`);
+    } catch { continue; }
+    if (!set) continue;
+
+    const projectPath = getProjectPath(project.name);
+    if (!projectPath) continue;
+
+    console.log(`[drain] ${project.name} → feature set #${set.id} "${set.title}" (${set.tasks.length} task(s))`);
+    try {
+      await dispatchFeatureSet({
+        projectName: project.name, projectPath,
+        featureSet: set, cloudApi: api,
+      });
+    } catch (err) {
+      console.error(`[drain] ${project.name} dispatch failed:`, err.message);
+    }
+  }
+}
+
+async function processMergeRequests() {
+  let requests;
+  try { requests = await api('GET', '/api/feature-sets/merge-requested'); }
+  catch { return; }
+  for (const set of requests || []) {
+    const projectPath = getProjectPath(set.project_name);
+    if (!projectPath || !set.branch_name) continue;
+    const extras = Array.isArray(set.extra_projects) ? set.extra_projects : [];
+    const extraPaths = extras.map(p => getProjectPath(p)).filter(Boolean);
+    const scope = extras.length ? `${set.project_name}+${extras.join(',')}` : set.project_name;
+    console.log(`[merge] ${scope} branch ${set.branch_name} → main`);
+    try {
+      const out = await mergeFeatureSet({ projectPath, branchName: set.branch_name, extraProjectPaths: extraPaths });
+      await api('POST', `/api/feature-sets/${set.id}/status`, { status: out.ok ? 'merged' : 'merge_failed' });
+      if (!out.ok) console.error(`[merge] failed: ${out.error}`);
+      else if (out.merged?.length) console.log(`[merge] done — merged in ${out.merged.length} repo(s)`);
+    } catch (err) {
+      console.error(`[merge] error on ${set.project_name}:`, err.message);
+      await api('POST', `/api/feature-sets/${set.id}/status`, { status: 'merge_failed' }).catch(() => {});
+    }
+  }
+}
+
+async function runClarity() {
+  if (Date.now() - lastClarity < CLARITY_INTERVAL_MS) return;
+  lastClarity = Date.now();
+  let sets;
+  try { sets = await api('GET', '/api/feature-sets'); } catch { return; }
+
+  const stale = (sets || []).filter(s =>
+    s.status === 'collecting'
+    && (s.tasks?.length || 0) >= 2
+    && (!s.clarified_at || s.updated_at > s.clarified_at)
+  );
+  if (!stale.length) return;
+
+  for (const set of stale) {
+    try {
+      const refined = await clarifyFeatureSet(set);
+      if (refined && (refined.title !== set.title || refined.description !== set.description)) {
+        await api('PATCH', `/api/feature-sets/${set.id}`, {
+          title: refined.title, description: refined.description,
+        });
+        console.log(`[clarity] #${set.id} → "${refined.title}"`);
+      }
+      // Always mark checked so we don't re-refine an unchanged set every tick
+      await api('POST', `/api/feature-sets/${set.id}/clarified`).catch(() => {});
+    } catch (err) { console.error('[clarity] fail:', err.message); }
+  }
+}
+
+async function runSynthesis() {
+  if (Date.now() - lastSynthesis < SYNTHESIS_INTERVAL_MS) return;
+  lastSynthesis = Date.now();
+
+  for (const project of cachedProjects) {
+    let tasks;
+    try {
+      const res = await fetch(`${CLOUD_URL}/api/projects`, { headers: headers() });
+      if (!res.ok) continue;
+      const all = await res.json();
+      const p = all.find(x => x.name === project.name);
+      tasks = p?.pending_tasks || [];
+    } catch { continue; }
+    if (tasks.length < 2) continue;
+
+    try {
+      const result = await synthesizeProject(project.name, tasks);
+      for (const cluster of result.clusters || []) {
+        if (!cluster.merge_ids?.length) continue;
+        console.log(`[synth] ${project.name}: merging ${cluster.merge_ids.length} task(s) into #${cluster.keep_id}`);
+        await api('POST', '/api/synthesis/merge', {
+          project_name: project.name,
+          keep_id: cluster.keep_id,
+          merge_ids: cluster.merge_ids,
+          merged_text: cluster.merged_text,
+          detail: cluster.reason,
+        }).catch(err => console.error('[synth] merge failed:', err.message));
+      }
+    } catch (err) {
+      console.error(`[synth] ${project.name} failed:`, err.message);
+    }
+  }
+}
+
+async function tick() {
+  const now = Date.now();
+
+  if (now - lastFullScan > FULL_SCAN_INTERVAL_MS) {
+    await fullScan();
+  } else {
+    await quickSessionScan();
+    await api('POST', '/api/state', {
+      projects: cachedProjects,
+      sessions: cachedSessions,
+    }).catch(() => {});
+  }
+
+  await processQueue();
+  await maybeNightlyKickoff();
+  await drainLegacyTasks();
+  await drainFeatureSets();
+  await processMergeRequests();
+  await runClarity().catch(err => console.error('[clarity] tick error:', err.message));
+  await runSynthesis().catch(err => console.error('[synth] tick error:', err.message));
+}
+
+async function main() {
+  console.log('Maestro daemon starting...');
+  console.log(`Cloud URL: ${CLOUD_URL}`);
+  console.log(`Nightly kickoff hour: ${NIGHTLY_KICKOFF_HOUR}:00 local`);
+
+  if (!process.env.GEMINI_API_KEY) {
+    console.error('Error: GEMINI_API_KEY not set');
+    process.exit(1);
+  }
+
+  await fullScan().catch(err => console.error('Initial scan failed:', err.message));
+  await processQueue().catch(err => console.error('Initial queue check failed:', err.message));
+  await drainLegacyTasks().catch(err => console.error('Initial legacy drain failed:', err.message));
+  await drainFeatureSets().catch(err => console.error('Initial fs drain failed:', err.message));
+
+  setInterval(async () => {
+    try { await tick(); }
+    catch (err) { console.error('[tick] Error:', err.message); }
+  }, POLL_INTERVAL_MS);
+
+  console.log(`Daemon running — polling every ${POLL_INTERVAL_MS / 1000}s`);
+}
+
+main();

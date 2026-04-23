@@ -1,0 +1,29 @@
+# Fly.io deployment config for maestro cloud relay
+# Deploy with: fly launch (first time) or fly deploy (subsequent)
+
+app = "maestro-nc"
+primary_region = "ord"
+
+[build]
+  # No Dockerfile needed — Fly auto-detects Node.js
+
+[env]
+  PORT = "3750"
+  NODE_ENV = "production"
+
+[http_service]
+  internal_port = 3750
+  force_https = true
+  auto_stop_machines = false   # keep always-on so iPhone always works
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[mounts]
+  # Persist the SQLite database across deploys
+  source = "maestro_data"
+  destination = "/data"
