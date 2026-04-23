@@ -91,12 +91,29 @@ npm run build            # produces web/dist/ served by cloud/server.js
 
 - `POST /api/capture` — drop a capture (PWA calls this)
 - `GET /api/feature-sets` — list feature sets
+- `GET /api/feature-sets/:id` — single feature set (daemon polls this between pipeline phases for the cancel flag)
 - `POST /api/feature-sets/:id/status` — worker/daemon updates
+- `POST /api/feature-sets/:id/cancel` — user-initiated stop of a running pipeline; daemon aborts at the next phase boundary with status=`cancelled`
 - `POST /api/worker/*` — worker lifecycle pings
 - `GET /api/projects` — per-project rollup incl. last deploy status
 - `GET /api/status` — suite-standard status envelope
 
 Auth: `X-Maestro-Password` (legacy) or `Authorization: Bearer <SUITE_API_KEY>` (for inter-suite status polling).
+
+### Pipeline hardening (2026-04)
+
+The overnight loop (`local/daemon.js::runMergePipeline`) now runs all four phases atomically per feature set:
+
+1. **Pre-merge tests** — run in the **primary AND every extra repo** that carries the branch (integration sets). A red test in any participant halts the whole pipeline with `status=test_failed`.
+2. **Merge** — local `git merge --no-ff` across primary + extras; push to origin.
+3. **Deploy** — sequential per project with `/api/status` health check. If any deploy fails, **every successful sibling is also rolled back** (fly rollback + git revert) so main doesn't drift across the repos that already merged. Status=`deploy_failed_reverted`.
+4. **Integration tests** — post-deploy smoke against the just-shipped fleet.
+
+Revert pushes are **verified** — after `git push origin main`, the daemon fetches and compares `origin/main` SHA against local HEAD. If they diverge (push failed, pre-commit hook on remote, etc.), a prominent warning is logged so the bad merge can't silently drift back in.
+
+Workers have a **wall-clock guard** (`WORKER_MAX_MS`, default 60 min) so a stuck `claude -p` can't lock the project slot indefinitely.
+
+Cancel: `POST /api/feature-sets/:id/cancel` sets a flag; `checkCancel` polls between every pipeline phase and aborts cleanly.
 
 ---
 
