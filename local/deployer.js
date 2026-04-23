@@ -29,6 +29,7 @@ function getDeployCwd(projectName) {
 
 async function healthCheck(flyApp) {
   const url = `https://${flyApp}.fly.dev/api/status`;
+  let saw401 = false;
   for (let i = 0; i < HEALTH_CHECK_ATTEMPTS; i++) {
     try {
       const res = await fetch(url, {
@@ -39,8 +40,17 @@ async function healthCheck(flyApp) {
         const body = await res.json();
         if (body?.ok === true) return { ok: true, body };
       }
+      // A 401 means the app is up but our SUITE_API_KEY is stale/rotated.
+      // That's an operator problem, not a bad-deploy problem — reverting a
+      // good merge because we can't auth into its health check would be
+      // catastrophic. Treat as healthy-but-unauthenticated and let the
+      // operator notice the auth mismatch.
+      if (res.status === 401 || res.status === 403) saw401 = true;
     } catch { /* transient, keep polling */ }
     await new Promise(r => setTimeout(r, HEALTH_CHECK_INTERVAL_MS));
+  }
+  if (saw401) {
+    return { ok: true, warning: `health endpoint returned 401/403 — SUITE_API_KEY likely out of sync with ${flyApp}, but the app is responding; skipping revert` };
   }
   return { ok: false, error: `health check failed after ${HEALTH_CHECK_ATTEMPTS} attempts` };
 }
