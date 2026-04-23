@@ -1,4 +1,5 @@
 import express from 'express';
+import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import db from './db.js';
@@ -8,16 +9,37 @@ const app = express();
 const PORT = process.env.PORT || 3750;
 const SECRET = process.env.MAESTRO_SECRET;
 const PASSWORD = process.env.MAESTRO_PASSWORD;
+const SUITE_API_KEY = process.env.SUITE_API_KEY;
+const START_TIME = Date.now();
+
+// Read cloud package.json version once at startup
+let PKG_VERSION = 'unknown';
+try {
+  PKG_VERSION = JSON.parse(readFileSync(join(__dirname, 'package.json'), 'utf8')).version || 'unknown';
+} catch { /* ignore */ }
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(join(__dirname, 'public')));
 
+// Track the most recent daemon poll timestamp (in-memory is fine — it's a
+// liveness heartbeat, not durable state).
+let lastDaemonPing = null;
+
+function bearerToken(req) {
+  const h = req.headers['authorization'] || '';
+  if (h.toLowerCase().startsWith('bearer ')) return h.slice(7).trim();
+  return null;
+}
+
 function auth(req, res, next) {
-  if (!SECRET && !PASSWORD) return next();
+  if (!SECRET && !PASSWORD && !SUITE_API_KEY) return next();
   const providedSecret = req.headers['x-maestro-secret'];
   const providedPassword = req.headers['x-maestro-password'];
+  const token = bearerToken(req);
   if (SECRET && providedSecret === SECRET) return next();
   if (PASSWORD && providedPassword === PASSWORD) return next();
+  if (token && SECRET && token === SECRET) return next();
+  if (token && SUITE_API_KEY && token === SUITE_API_KEY) return next();
   return res.status(401).json({ error: 'unauthorized' });
 }
 
@@ -44,10 +66,48 @@ app.post('/api/capture', auth, (req, res) => {
 
 // GET /api/queue — daemon polls for unprocessed captures
 app.get('/api/queue', auth, (req, res) => {
+  lastDaemonPing = new Date().toISOString();
   const rows = db.prepare(
     'SELECT * FROM captures WHERE processed_at IS NULL ORDER BY created_at ASC'
   ).all();
   res.json(rows);
+});
+
+// GET /api/status — suite health probe (extended auth: Bearer MAESTRO_SECRET or SUITE_API_KEY)
+app.get('/api/status', auth, (req, res) => {
+  // captures still waiting to be routed
+  const pendingCaptures = db.prepare(
+    `SELECT COUNT(*) AS n FROM captures WHERE processed_at IS NULL`
+  ).get().n;
+
+  // feature sets that aren't yet terminal
+  const openFeatureSets = db.prepare(
+    `SELECT COUNT(*) AS n FROM feature_sets
+       WHERE status NOT IN ('done','failed','merged')`
+  ).get().n;
+
+  // distinct (project, session) pairs actively running or heartbeat in last 5 min
+  const runningWorkers = db.prepare(
+    `SELECT COUNT(*) AS n FROM (
+       SELECT DISTINCT project_name, COALESCE(session_id, run_id) AS sid
+         FROM worker_runs
+        WHERE status = 'running'
+           OR datetime(started_at) > datetime('now', '-5 minutes')
+     )`
+  ).get().n;
+
+  res.json({
+    app: 'maestro',
+    version: PKG_VERSION,
+    ok: true,
+    uptime_seconds: Math.floor(process.uptime()),
+    metrics: {
+      pending_captures: pendingCaptures,
+      open_feature_sets: openFeatureSets,
+      running_workers: runningWorkers,
+      last_daemon_ping: lastDaemonPing,
+    },
+  });
 });
 
 // POST /api/queue/:id/ack — daemon marks a capture processed
