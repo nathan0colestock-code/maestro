@@ -11,12 +11,16 @@ import { test } from 'node:test';
 import assert from 'node:assert';
 import { APP_URLS, APP_KEYS, authedFetch, appAuthHeader } from './_helpers.mjs';
 
-const PROBE_CONTACT = {
-  gloss_person_id: 'suite-integration-probe',
-  display_name: 'Suite Integration Probe',
-  emails: ['suite-integration-probe@example.invalid'],
-  phones: [],
-  notes: 'Written by maestro/tests/integration/gloss-comms-contacts.test.mjs — safe to delete',
+// comms accepts either `{ contacts: [...] }` or a bare array at
+// POST /api/gloss/contacts. We use the wrapped form for clarity.
+const PROBE_PAYLOAD = {
+  contacts: [{
+    gloss_person_id: 'suite-integration-probe',
+    display_name: 'Suite Integration Probe',
+    emails: ['suite-integration-probe@example.invalid'],
+    phones: [],
+    notes: 'Written by maestro/tests/integration/gloss-comms-contacts.test.mjs — safe to delete',
+  }],
 };
 
 if (!APP_KEYS.comms) {
@@ -26,7 +30,7 @@ if (!APP_KEYS.comms) {
     const res = await authedFetch(`${APP_URLS.comms}/api/gloss/contacts`, {
       method: 'POST',
       headers: { ...appAuthHeader('comms'), 'Content-Type': 'application/json' },
-      body: JSON.stringify(PROBE_CONTACT),
+      body: JSON.stringify(PROBE_PAYLOAD),
     });
     assert.ok(res.status >= 200 && res.status < 300,
       `POST /api/gloss/contacts → ${res.status}: ${await res.text().catch(() => '')}`);
@@ -36,7 +40,7 @@ if (!APP_KEYS.comms) {
     const res = await authedFetch(`${APP_URLS.comms}/api/gloss/contacts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(PROBE_CONTACT),
+      body: JSON.stringify(PROBE_PAYLOAD),
     });
     assert.ok(res.status === 401 || res.status === 403,
       `unauthenticated POST → ${res.status} (expected 401/403)`);
