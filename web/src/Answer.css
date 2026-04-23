@@ -71,6 +71,8 @@
   border-radius: var(--radius);
   padding: 10px 14px;
   font-size: 14px;
+  /* Suite touch-target minimum. */
+  min-height: var(--suite-touch-min);
 }
 .skip-btn:disabled { opacity: 0.4; }
 

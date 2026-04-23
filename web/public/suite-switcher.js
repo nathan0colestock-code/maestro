@@ -37,7 +37,7 @@
       padding: 0;
     }
     .suite-switcher-btn:hover { background: rgba(255, 255, 255, 1); transform: scale(1.04); }
-    .suite-switcher-btn:focus { outline: 2px solid #6b9bd1; outline-offset: 2px; }
+    .suite-switcher-btn:focus { outline: 2px solid var(--suite-focus, #6b9bd1); outline-offset: 2px; }
     .suite-switcher-btn svg { display: block; }
     @media (prefers-color-scheme: dark) {
       .suite-switcher-btn {
