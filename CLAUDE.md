@@ -91,4 +91,10 @@ The daemon reads `~/.claude/projects/<encoded-path>/*.jsonl` files. If `mtime < 
 
 ## Context Notes
 
+- [2026-04-23 17:37] Integration test probe.
+
+- [2026-04-23 17:35] User issued a 'probe' command. Investigate the intended meaning and appropriate system response for such terse inputs.
+
+- [2026-04-23 17:19] Verified that the Maestro router successfully accepts captures and creates feature sets, confirming the full autonomous pipeline is live.
+
 - [2026-04-23 14:30] Recorded a test capture as part of deploy verification for the Maestro system.
