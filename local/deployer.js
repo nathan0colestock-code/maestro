@@ -64,12 +64,54 @@ async function gitRevertMerge(projectPath, mergeSha) {
       `cd "${projectPath}" && git revert -m 1 --no-edit ${mergeSha}`,
       { timeout: 60_000 }
     );
-    // Push the revert so remote matches local.
-    await exec(
-      `cd "${projectPath}" && git push origin main`,
-      { timeout: 60_000 }
-    ).catch(() => {}); // push is best-effort; local revert is what matters
-    return { ok: true };
+    // Push the revert so remote matches local. Previously this was
+    // fire-and-forget with `.catch(() => {})`, which silently tolerated
+    // push failures — next laptop open / CI rebuild would pull the bad
+    // merge right back. Now: push, then fetch + compare origin/main SHA
+    // against local HEAD. If they diverge, surface loudly in the return.
+    let push_ok = false;
+    let push_error = null;
+    try {
+      await exec(
+        `cd "${projectPath}" && git push origin main`,
+        { timeout: 60_000 }
+      );
+      push_ok = true;
+    } catch (err) {
+      push_error = err.stderr?.toString() || err.message;
+      console.error(`[deploy] git push of revert failed for ${projectPath}: ${push_error}`);
+    }
+
+    let remote_matches = false;
+    let local_head = null, origin_head = null;
+    try {
+      await exec(`cd "${projectPath}" && git fetch origin main`, { timeout: 30_000 });
+      const { stdout: localRev } = await exec(
+        `cd "${projectPath}" && git rev-parse HEAD`, { timeout: 10_000 }
+      );
+      const { stdout: originRev } = await exec(
+        `cd "${projectPath}" && git rev-parse origin/main`, { timeout: 10_000 }
+      );
+      local_head = localRev.trim();
+      origin_head = originRev.trim();
+      remote_matches = local_head === origin_head;
+    } catch (err) {
+      console.error(`[deploy] could not verify remote after revert in ${projectPath}: ${err.message}`);
+    }
+
+    if (!push_ok || !remote_matches) {
+      console.error(
+        `[deploy] revert push VERIFICATION FAILED for ${projectPath} — ` +
+        `local HEAD=${local_head}, origin/main=${origin_head}, push_error=${push_error}. ` +
+        `Remote still holds the bad merge; manual push required.`
+      );
+    }
+
+    return {
+      ok: true, // local revert succeeded even if the push didn't
+      push_ok, push_error, remote_matches,
+      local_head, origin_head,
+    };
   } catch (err) {
     return { ok: false, error: err.stderr?.toString() || err.message };
   }
@@ -162,4 +204,33 @@ export async function deployProjects(projectNames) {
   }
   const failed = results.filter(r => !r.ok && !r.skipped);
   return { ok: failed.length === 0, results, failed };
+}
+
+// Roll back a project that deployed + health-checked OK earlier in the
+// pipeline, because a SIBLING project's deploy failed after. Without this,
+// project A would sit in prod talking to a reverted project B and
+// silently diverge — the exact "partial deploy inconsistent state" bug.
+// Uses the same flyRollback + gitRevertMerge pair as the single-project
+// failure path, so the return shape mirrors that path.
+export async function undeployProject(projectName) {
+  const flyApp = getFlyApp(projectName);
+  if (!flyApp) return { ok: true, skipped: 'no-fly-app-mapping', projectName };
+  const projectPath = getProjectPath(projectName);
+  const mergeSha = projectPath ? await getLastMergeSha(projectPath) : null;
+
+  console.log(`[deploy] ROLLBACK ${projectName} → ${flyApp} (sibling failed)`);
+  const fly = await flyRollback(flyApp);
+  let git = { skipped: 'no-merge-sha' };
+  if (mergeSha && projectPath) {
+    git = await gitRevertMerge(projectPath, mergeSha);
+  }
+  const postRevert = await healthCheck(flyApp);
+  return {
+    ok: fly.ok && (git.ok || git.skipped),
+    flyApp, projectName,
+    rolled_back_for: 'sibling_deploy_failure',
+    fly_rollback: fly,
+    git_revert: git,
+    post_revert_healthy: postRevert.ok,
+  };
 }

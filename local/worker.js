@@ -122,6 +122,22 @@ export function startWorker({ projectName, projectPath, task, context, priorQA, 
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
+  // Wall-clock guard: a stuck `claude -p` would otherwise hold
+  // activeRuns[project] indefinitely, blocking every future worker for
+  // that project. Default 60min; override via WORKER_MAX_MS env var.
+  const WORKER_MAX_MS = Number(process.env.WORKER_MAX_MS ?? 60 * 60_000);
+  let timedOut = false;
+  const killTimer = setTimeout(() => {
+    timedOut = true;
+    console.error(
+      `  [worker] ${projectName} run ${runId.slice(0, 8)} exceeded ${WORKER_MAX_MS}ms — sending SIGTERM`
+    );
+    try { child.kill('SIGTERM'); } catch {}
+    // If SIGTERM doesn't land within 10s, escalate to SIGKILL.
+    setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 10_000).unref();
+  }, WORKER_MAX_MS);
+  killTimer.unref();
+
   let stdout = '';
   let stderr = '';
   child.stdout.on('data', d => { stdout += d.toString(); });
@@ -130,18 +146,24 @@ export function startWorker({ projectName, projectPath, task, context, priorQA, 
   Promise.resolve().then(() => onStart?.({ runId, sessionId, projectName, task, started })).catch(() => {});
 
   child.on('error', err => {
+    clearTimeout(killTimer);
     markEnd(projectName);
     console.error(`  [worker] spawn error for ${projectName}:`, err.message);
     onEnd?.({ runId, sessionId, projectName, ended: new Date().toISOString(), status: 'error', summary: err.message, questions: [] });
   });
 
   child.on('exit', code => {
+    clearTimeout(killTimer);
     markEnd(projectName);
     const ended = new Date().toISOString();
     let summary = '';
     let cost = null;
     let durationMs = null;
     let status = code === 0 ? 'done' : 'error';
+    if (timedOut) {
+      status = 'timeout';
+      summary = `worker exceeded WORKER_MAX_MS=${WORKER_MAX_MS}ms and was SIGTERM'd`;
+    }
 
     try {
       const parsed = JSON.parse(stdout);
