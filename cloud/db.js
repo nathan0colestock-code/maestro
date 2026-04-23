@@ -133,5 +133,10 @@ safeMigrate('ALTER TABLE feature_sets ADD COLUMN cancel_requested INTEGER NOT NU
 // self-improvement loop (router + worker prompts, dynamic WORKER_MAX_MS,
 // regression flagging). TEXT (not JSON type) for broad sqlite compat.
 safeMigrate('ALTER TABLE feature_sets ADD COLUMN phase_timings TEXT');
+// Token counts per worker run. The reflection loop uses these to flag
+// runs that burned tokens without shipping. Added as nullable so older
+// rows read back as NULL.
+safeMigrate('ALTER TABLE worker_runs ADD COLUMN tokens_in INTEGER');
+safeMigrate('ALTER TABLE worker_runs ADD COLUMN tokens_out INTEGER');
 
 export default db;
