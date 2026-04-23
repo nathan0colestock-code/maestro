@@ -17,8 +17,12 @@
   const APPS = [
     { key: 'gloss',   label: 'Gloss',    url: 'https://gloss-nc.fly.dev',    hue: '#c9a97a' },
     { key: 'comms',   label: "Comm's",   url: 'https://comms-nc.fly.dev',    hue: '#6b9bd1' },
-    { key: 'black',   label: 'Black',    url: 'https://black-hole.fly.dev',  hue: '#3b3b3b' },
+    // Black's accent is the classify-purple used in its login and header chrome.
+    { key: 'black',   label: 'Black',    url: 'https://black-hole.fly.dev',  hue: '#a78bfa' },
     { key: 'scribe',  label: 'Scribe',   url: 'https://scribe-nc.fly.dev',   hue: '#8a6da5' },
+    // Maestro sits at the end of the grid so the suite switcher can route back
+    // to the orchestrator dashboard. Softer grey reads as "meta" vs. the apps.
+    { key: 'maestro', label: 'Maestro',  url: 'https://maestro-nc.fly.dev',  hue: '#4a4a4a' },
   ];
 
   const STYLE = `

@@ -9,6 +9,7 @@ import { runProjectTests, runIntegrationTests, checkoutBranch, branchExists } fr
 import { readFile } from 'fs/promises';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
+import { exec } from 'child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SYSTEM_MD_PATH = resolve(__dirname, '..', 'SYSTEM.md');
@@ -316,9 +317,10 @@ async function runMergePipeline(set) {
   console.log(`[pipeline] merged in ${mergeResult.merged?.length || 0} repo(s) — pushing`);
 
   // Push each merged repo so the Fly deploy builds from up-to-date main.
+  // child_process is imported statically at the top of the file — there's no
+  // reason to dynamic-import it once per repo inside this loop.
   for (const repoPath of mergeResult.merged || []) {
     try {
-      const { exec } = await import('child_process');
       await new Promise((res, rej) => {
         exec(`cd "${repoPath}" && git push origin main`, { timeout: 60_000 }, (err, stdout) => {
           if (err) rej(err); else res(stdout);
