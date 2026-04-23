@@ -49,7 +49,7 @@ npm run build   # outputs to cloud/public/
 Edit `local/project-scanner.js` PROJECTS array to add/remove projects.
 Edit `local/executor.js` PROJECT_PATHS to match.
 
-Current projects: flock, foxed, tend, comms, maestro.
+Current projects: flock, gloss, tend, comms, maestro, scribe, black.
 
 ## Key Files
 
