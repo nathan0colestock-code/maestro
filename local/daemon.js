@@ -7,6 +7,7 @@ import { synthesizeProject, clarifyFeatureSet } from './synthesis.js';
 import { deployProject } from './deployer.js';
 import { runProjectTests, runIntegrationTests, checkoutBranch, branchExists } from './test-runner.js';
 import { getProjectStats, detectRegression } from './pipeline-stats.js';
+import { runNightlyReflection, alreadyReflectedToday } from './nightly-reflect.js';
 import { readFile } from 'fs/promises';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
@@ -24,6 +25,11 @@ const SYNTHESIS_INTERVAL_MS = 30 * 60_000;
 const CLARITY_INTERVAL_MS = 10 * 60_000;
 const NIGHTLY_KICKOFF_HOUR = Number(process.env.NIGHTLY_KICKOFF_HOUR ?? 23);
 const NIGHTLY_CATCHUP_CUTOFF_HOUR = Number(process.env.NIGHTLY_CATCHUP_CUTOFF_HOUR ?? 7);
+// Reflection window: fire once the night's queue has settled. Defaults to
+// 01:00–08:00 local. The reflection module also guards against re-firing
+// the same date via a LESSONS.md sentinel.
+const REFLECT_WINDOW_START = Number(process.env.MAESTRO_REFLECT_START_HOUR ?? 1);
+const REFLECT_WINDOW_END = Number(process.env.MAESTRO_REFLECT_END_HOUR ?? 8);
 
 let cachedProjects = [];
 let cachedSessions = [];
@@ -606,6 +612,51 @@ async function tick() {
   await processMergeRequests();
   await runClarity().catch(err => console.error('[clarity] tick error:', err.message));
   await runSynthesis().catch(err => console.error('[synth] tick error:', err.message));
+  await maybeRunReflection().catch(err => console.error('[reflect] tick error:', err.message));
+}
+
+// Fire the self-reflection loop once per night after the queue fully settles.
+// Guard stack:
+// 1. Time window (default 01:00–08:00 local) — avoids firing mid-evening.
+// 2. Queue-idle check — no active workers, no queued/running/merge_requested sets.
+// 3. LESSONS.md sentinel — reflection appends `## YYYY-MM-DD`, so a
+//    second tick today sees the date and bails without a cloud call.
+async function maybeRunReflection() {
+  const hour = new Date().getHours();
+  const inWindow = REFLECT_WINDOW_START <= REFLECT_WINDOW_END
+    ? (hour >= REFLECT_WINDOW_START && hour < REFLECT_WINDOW_END)
+    : (hour >= REFLECT_WINDOW_START || hour < REFLECT_WINDOW_END);
+  if (!inWindow) return;
+  if (await alreadyReflectedToday()) return;
+
+  for (const project of cachedProjects) {
+    if (hasActiveWorker(project.name)) return;
+  }
+
+  let pending;
+  try {
+    pending = await api('GET', '/api/feature-sets');
+  } catch { return; }
+  const busy = (pending || []).some(s =>
+    s.status === 'queued' || s.status === 'running' || s.status === 'merge_requested'
+  );
+  if (busy) return;
+
+  console.log('[reflect] queue settled — running nightly self-reflection');
+  try {
+    const result = await runNightlyReflection(api);
+    if (result.skipped) {
+      console.log(`[reflect] skipped: ${result.skipped}`);
+    } else {
+      console.log(
+        `[reflect] ${result.today}: top_pattern="${result.top_pattern}" ` +
+        `lessons=${result.lessons_count} capture_id=${result.capture_id} ` +
+        `report=${result.report_path}`
+      );
+    }
+  } catch (err) {
+    console.error('[reflect] failed:', err.message);
+  }
 }
 
 async function main() {

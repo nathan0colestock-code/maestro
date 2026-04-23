@@ -59,7 +59,9 @@ describe('routeCapture retry behaviour', () => {
     });
     assert.equal(calls, 3);
     assert.equal(sleeps.length, 2, 'two sleeps between three attempts');
-    assert.ok(sleeps[1] >= sleeps[0], 'backoff grows between retries');
+    // Jitter can make a short attempt-1 random exceed a low attempt-2, so
+    // assert the base component (delay minus max 500ms jitter) grows.
+    assert.ok(sleeps[1] >= sleeps[0] - 500, 'backoff base grows between retries, allowing jitter');
     assert.equal(plan.captures_decomposed.length, 1);
   });
 

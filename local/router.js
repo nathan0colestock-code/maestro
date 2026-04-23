@@ -11,10 +11,20 @@ const ROUTER_MODEL = 'gemini-2.5-flash';
 // suite-wide map (apps, integration points, pipeline states). Failure is
 // non-fatal — routing still works, it just won't know about integrations.
 let SUITE_SYSTEM_CONTEXT = '';
+let LESSONS_CONTEXT = '';
 try {
   const here = dirname(fileURLToPath(import.meta.url));
   SUITE_SYSTEM_CONTEXT = await readFile(resolve(here, '..', 'SYSTEM.md'), 'utf8');
 } catch { /* absent or unreadable — proceed without it */ }
+// LESSONS.md is written by the nightly reflection loop. Loading it on each
+// require so rules compound across nights — a lesson added last night is in
+// effect tonight without a daemon restart.
+async function loadLessons() {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    return await readFile(resolve(here, '..', 'LESSONS.md'), 'utf8');
+  } catch { return ''; }
+}
 
 function formatAge(isoString) {
   if (!isoString) return 'unknown';
@@ -118,7 +128,15 @@ ${projects.map(p => formatTimingLine(p.name, projectStatsByName[p.name])).join('
 
 ## Suite system context (from maestro/SYSTEM.md)
 
-${SUITE_SYSTEM_CONTEXT}` : ''}`;
+${SUITE_SYSTEM_CONTEXT}` : ''}${LESSONS_CONTEXT ? `
+
+---
+
+## Lessons from past nights (from maestro/LESSONS.md)
+
+These rules were written by Maestro's own nightly reflection loop after past runs. Treat them as authoritative when they apply.
+
+${LESSONS_CONTEXT}` : ''}`;
 }
 
 // Transient errors we retry with exponential backoff: 429 rate limit, 5xx,
@@ -147,6 +165,9 @@ export async function routeCapture(captureText, projects, sessions, openFeatureS
     catch { return [p.name, {}]; }
   }));
   const projectStatsByName = Object.fromEntries(statsPairs);
+  // Refresh lessons on every routing call — the reflector may have appended
+  // since the last capture, and we want the freshest rules in effect.
+  LESSONS_CONTEXT = await loadLessons();
   const systemInstruction = buildSystemPrompt(projects, sessions, openFeatureSets, projectStatsByName);
 
   let lastErr;

@@ -3,11 +3,23 @@
 
 import { spawn } from 'child_process';
 import { randomUUID } from 'crypto';
+import { readFileSync } from 'fs';
+import { dirname, resolve } from 'path';
+import { fileURLToPath } from 'url';
 
 const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 const WORKER_MODEL = process.env.WORKER_MODEL || 'sonnet';
 const MAX_ACTIVE_PER_PROJECT = 1;
 const activeRuns = new Map();
+
+// Read LESSONS.md on each prompt build. The reflector appends to this file
+// after each night; we want fresh rules in every worker without a restart.
+function readLessons() {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    return readFileSync(resolve(here, '..', 'LESSONS.md'), 'utf8');
+  } catch { return ''; }
+}
 
 function formatProjectTimingNote(projectStats) {
   if (!projectStats || !Object.keys(projectStats).length) return null;
@@ -69,6 +81,17 @@ function buildPrompt(task, context, priorQA, projectStats) {
     `## Final output`,
     `End your session with a one-paragraph plain summary of what you did and what remains, followed by any QUESTION: lines if blocked.`,
   );
+
+  const lessons = readLessons();
+  if (lessons.trim()) {
+    lines.push(
+      ``,
+      `## Lessons from past Maestro runs (maestro/LESSONS.md)`,
+      `Rules learned by Maestro's reflection loop on prior nights. Honor them if they apply to this task.`,
+      ``,
+      lessons.trim(),
+    );
+  }
   return lines.join('\n');
 }
 
