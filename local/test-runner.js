@@ -85,6 +85,21 @@ export async function runIntegrationTests() {
   }
 }
 
+// Does this repo have a local branch with the given name? Used to decide
+// whether a peer repo should be tested as part of an integration feature-set:
+// only repos that actually participate (i.e. carry the branch) are tested.
+export async function branchExists(projectPath, branchName) {
+  try {
+    await exec(
+      `cd "${projectPath}" && git show-ref --verify --quiet refs/heads/${branchName}`,
+      { timeout: 10_000 }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Checkout a branch in a repo (used before runProjectTests on a feature-set branch).
 // Restores the repo to `main` afterwards via the returned restore() callback.
 export async function checkoutBranch(projectPath, branchName) {

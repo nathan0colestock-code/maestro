@@ -5,7 +5,7 @@ import { executeRoutingPlan, dispatchTask, dispatchFeatureSet, mergeFeatureSet, 
 import { hasActiveWorker } from './worker.js';
 import { synthesizeProject, clarifyFeatureSet } from './synthesis.js';
 import { deployProject } from './deployer.js';
-import { runProjectTests, runIntegrationTests, checkoutBranch } from './test-runner.js';
+import { runProjectTests, runIntegrationTests, checkoutBranch, branchExists } from './test-runner.js';
 import { readFile } from 'fs/promises';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
@@ -251,26 +251,47 @@ async function runMergePipeline(set) {
   const scope = extras.length ? `${set.project_name}+${extras.join(',')}` : set.project_name;
 
   // ─── Phase 1: pre-merge tests on the feature branch ──────────────────
-  console.log(`[pipeline] ${scope} branch ${set.branch_name} — running pre-merge tests`);
-  const checkout = await checkoutBranch(projectPath, set.branch_name);
-  if (!checkout.ok) {
-    console.error(`[pipeline] checkout failed: ${checkout.error}`);
-    await api('POST', `/api/feature-sets/${set.id}/status`, {
-      status: 'merge_failed', note: `checkout failed: ${checkout.error}`,
-    }).catch(() => {});
-    return;
+  // Test the primary project AND every extra that actually carries the
+  // same branch name. An integration set where the primary is gloss but
+  // the branch also exists in comms used to ship with comms tests never
+  // running — now a red peer fails the pipeline before any merge happens.
+  console.log(`[pipeline] ${scope} branch ${set.branch_name} — running pre-merge tests across ${allProjects.length} project(s)`);
+  for (const projectName of allProjects) {
+    const path = getProjectPath(projectName);
+    if (!path) continue;
+    const hasBranch = await branchExists(path, set.branch_name);
+    if (!hasBranch) {
+      // Extra projects may be listed for context but not participate — skip.
+      if (projectName === set.project_name) {
+        console.error(`[pipeline] primary ${projectName} missing branch ${set.branch_name}`);
+        await api('POST', `/api/feature-sets/${set.id}/status`, {
+          status: 'merge_failed', note: `primary project ${projectName} has no branch ${set.branch_name}`,
+        }).catch(() => {});
+        return;
+      }
+      console.log(`[pipeline] ${projectName} has no branch ${set.branch_name} — skipping peer test`);
+      continue;
+    }
+    const checkout = await checkoutBranch(path, set.branch_name);
+    if (!checkout.ok) {
+      console.error(`[pipeline] checkout failed on ${projectName}: ${checkout.error}`);
+      await api('POST', `/api/feature-sets/${set.id}/status`, {
+        status: 'merge_failed', note: `checkout failed on ${projectName}: ${checkout.error}`,
+      }).catch(() => {});
+      return;
+    }
+    const preTest = await runProjectTests(projectName);
+    await checkout.restore();
+    if (!preTest.ok) {
+      console.error(`[pipeline] ${projectName} tests failed — not merging`);
+      await api('POST', `/api/feature-sets/${set.id}/status`, {
+        status: 'test_failed',
+        note: `${projectName}: ${(preTest.stderr || preTest.error || '').slice(0, 1800)}`,
+      }).catch(() => {});
+      return;
+    }
+    console.log(`[pipeline] ${projectName} tests ${preTest.skipped ? `skipped (${preTest.skipped})` : '✓'}`);
   }
-  const preTest = await runProjectTests(set.project_name);
-  await checkout.restore();
-  if (!preTest.ok) {
-    console.error(`[pipeline] ${set.project_name} tests failed — not merging`);
-    await api('POST', `/api/feature-sets/${set.id}/status`, {
-      status: 'test_failed',
-      note: (preTest.stderr || preTest.error || '').slice(0, 2000),
-    }).catch(() => {});
-    return;
-  }
-  console.log(`[pipeline] ${set.project_name} tests ${preTest.skipped ? `skipped (${preTest.skipped})` : '✓'}`);
 
   // ─── Phase 2: merge to main (primary + extras) ──────────────────────
   let mergeResult;
@@ -309,6 +330,9 @@ async function runMergePipeline(set) {
   }
 
   // ─── Phase 3: deploy each project, health-check, auto-revert on fail ─
+  // If any deploy fails, we roll back EVERY already-successful sibling too.
+  // Previous behavior left early-in-the-list projects live against a
+  // reverted later-in-the-list project — quietly inconsistent prod.
   const deployResults = [];
   for (const projectName of allProjects) {
     const r = await deployProject(projectName);
@@ -321,11 +345,27 @@ async function runMergePipeline(set) {
 
   const anyDeployFailed = deployResults.some(r => !r.ok && !r.skipped);
   if (anyDeployFailed) {
+    // Roll back every sibling that *did* deploy+health-check OK earlier
+    // in the loop. Use dynamic import so this file stays aligned with the
+    // existing import at the top; undeployProject is the new helper.
+    const { undeployProject } = await import('./deployer.js');
+    const siblingRollbacks = [];
+    for (const r of deployResults) {
+      if (r.ok && !r.skipped) {
+        const back = await undeployProject(r.projectName);
+        siblingRollbacks.push(back);
+      }
+    }
     await api('POST', `/api/feature-sets/${set.id}/status`, {
       status: 'deploy_failed_reverted',
       note: JSON.stringify({
         failed: deployResults.filter(r => !r.ok && !r.skipped).map(r => ({
           project: r.projectName, flyApp: r.flyApp, error: r.error,
+          fly_rollback: r.fly_rollback, git_revert: r.git_revert,
+          post_revert_healthy: r.post_revert_healthy,
+        })),
+        sibling_rollbacks: siblingRollbacks.map(r => ({
+          project: r.projectName, flyApp: r.flyApp, ok: r.ok,
           fly_rollback: r.fly_rollback, git_revert: r.git_revert,
           post_revert_healthy: r.post_revert_healthy,
         })),
