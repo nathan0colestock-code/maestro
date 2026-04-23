@@ -117,6 +117,19 @@
   50% { opacity: 0.55; }
 }
 
+/* Deploy health indicator — green for the last successful deploy pipeline,
+ * amber for rolled-back or integration-failed, red for test/merge failures. */
+.deploy-dot {
+  font-size: 14px;
+  line-height: 1;
+  font-weight: 700;
+  margin-left: -2px;
+}
+.deploy-ok { color: #34d399; }
+.deploy-reverted { color: #fbbf24; }
+.deploy-warn { color: #fbbf24; }
+.deploy-bad { color: #f87171; }
+
 .worker-status {
   font-size: 13px;
   color: #fbbf24;

@@ -166,12 +166,42 @@ app.get('/api/projects', auth, (req, res) => {
     workersByProject[w.project_name].push(w);
   }
 
+  // Per-project deploy rollup: last feature set that reached a terminal
+  // deploy state (merged_and_deployed or deploy_failed_reverted or
+  // integration_failed). Drives the red/green deploy indicator on the
+  // iPhone dashboard.
+  const deployByProject = {};
+  const deployRows = db.prepare(`
+    SELECT project_name, status, deploy_status, deployed_at, merged_at, note, updated_at
+    FROM feature_sets
+    WHERE status IN ('merged_and_deployed','deploy_failed_reverted','integration_failed','test_failed','merge_failed','merged')
+    ORDER BY COALESCE(deployed_at, merged_at, updated_at) DESC
+  `).all();
+  for (const r of deployRows) {
+    if (!deployByProject[r.project_name]) {
+      deployByProject[r.project_name] = {
+        last_deploy_at: r.deployed_at || r.merged_at || r.updated_at,
+        last_deploy_status: r.deploy_status
+          || (r.status === 'merged_and_deployed' ? 'ok'
+            : r.status === 'deploy_failed_reverted' ? 'reverted'
+            : r.status === 'integration_failed' ? 'integration_failed'
+            : r.status === 'test_failed' ? 'test_failed'
+            : r.status === 'merge_failed' ? 'merge_failed'
+            : 'ok'),
+        last_deploy_note: r.note || null,
+      };
+    }
+  }
+
   res.json(projects.map(p => ({
     ...p,
     session: sessionsByProject[p.name] || null,
     pending_tasks: (tasksByProject[p.name] || []).slice(0, 5),
     worker_runs: (workersByProject[p.name] || []).slice(0, 5),
     active_workers: (workersByProject[p.name] || []).filter(w => w.status === 'running').length,
+    last_deploy_at: deployByProject[p.name]?.last_deploy_at || null,
+    last_deploy_status: deployByProject[p.name]?.last_deploy_status || null,
+    last_deploy_note: deployByProject[p.name]?.last_deploy_note || null,
   })));
 });
 
