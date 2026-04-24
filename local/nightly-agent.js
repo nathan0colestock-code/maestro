@@ -30,15 +30,25 @@ import { appendTask, appendNote } from './doc-updater.js';
 
 const exec = promisify(execCallback);
 
-// Project → Fly.io app name. Set via env so CI and test environments don't
-// accidentally deploy to production. The nightly routine only ships projects
-// whose Fly app name is explicitly configured; others commit-and-push only.
+// Project → Fly.io app name. Explicit env override wins; otherwise derive
+// from <APP>_URL so adding a new deployed app only requires setting its URL.
+// Set <APP>_FLY_APP="" to force commit-and-push-only for a specific project.
+function flyAppFromUrl(url) {
+  if (!url) return null;
+  const m = String(url).match(/^https?:\/\/([^./]+)\.fly\.dev/);
+  return m ? m[1] : null;
+}
+function resolveFlyApp(envOverride, urlEnv) {
+  if (envOverride === '') return null;
+  if (envOverride) return envOverride;
+  return flyAppFromUrl(urlEnv);
+}
 const FLY_APPS = {
-  gloss: process.env.GLOSS_FLY_APP || (process.env.GLOSS_URL?.includes('gloss-nc') ? 'gloss-nc' : null),
-  comms: process.env.COMMS_FLY_APP || null,
-  scribe: process.env.SCRIBE_FLY_APP || null,
-  black: process.env.BLACK_FLY_APP || null,
-  tend: process.env.TEND_FLY_APP || null,
+  gloss: resolveFlyApp(process.env.GLOSS_FLY_APP, process.env.GLOSS_URL),
+  comms: resolveFlyApp(process.env.COMMS_FLY_APP, process.env.COMMS_URL),
+  scribe: resolveFlyApp(process.env.SCRIBE_FLY_APP, process.env.SCRIBE_URL),
+  black: resolveFlyApp(process.env.BLACK_FLY_APP, process.env.BLACK_URL),
+  tend: resolveFlyApp(process.env.TEND_FLY_APP, process.env.TEND_URL),
 };
 const SHIP_ENABLED = process.env.NIGHTLY_SHIP !== 'false';
 const HEALTH_TIMEOUT_MS = 90_000;
