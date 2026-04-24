@@ -50,7 +50,22 @@ function formatTimingLine(project, stats) {
   return parts.length ? `${project}: ${parts.join('; ')}` : `${project}: (no recent pipeline history)`;
 }
 
-function buildSystemPrompt(projects, sessions, openFeatureSets, projectStatsByName = {}) {
+// Small TTL cache. The system prompt only changes when projects/sessions/
+// feature-sets/stats shift; routing fires on every capture, so regenerating
+// this O(projects) prompt each time was wasted work.
+const PROMPT_CACHE = { key: null, value: null, at: 0 };
+const PROMPT_TTL_MS = 5 * 60 * 1000;
+function promptCacheKey(projects, sessions, openFeatureSets, projectStatsByName) {
+  // Stable hash via JSON of the signals that actually affect output.
+  return JSON.stringify([
+    projects.map(p => [p.name, p.open_task_count, p.last_commit]),
+    sessions.map(s => [s.project_name, s.is_active, s.last_active, s.agent_type, s.last_action]),
+    (openFeatureSets || []).map(fs => [fs.id, fs.project_name, fs.title, fs.description, fs.task_count, fs.status]),
+    Object.keys(projectStatsByName || {}).sort(),
+  ]);
+}
+
+function buildSystemPromptUncached(projects, sessions, openFeatureSets, projectStatsByName = {}) {
   const sessionsByProject = {};
   for (const s of sessions) sessionsByProject[s.project_name] = s;
 
@@ -137,6 +152,19 @@ ${SUITE_SYSTEM_CONTEXT}` : ''}${LESSONS_CONTEXT ? `
 These rules were written by Maestro's own nightly reflection loop after past runs. Treat them as authoritative when they apply.
 
 ${LESSONS_CONTEXT}` : ''}`;
+}
+
+function buildSystemPrompt(projects, sessions, openFeatureSets, projectStatsByName = {}) {
+  const key = promptCacheKey(projects, sessions, openFeatureSets, projectStatsByName);
+  const now = Date.now();
+  if (PROMPT_CACHE.key === key && now - PROMPT_CACHE.at < PROMPT_TTL_MS) {
+    return PROMPT_CACHE.value;
+  }
+  const value = buildSystemPromptUncached(projects, sessions, openFeatureSets, projectStatsByName);
+  PROMPT_CACHE.key = key;
+  PROMPT_CACHE.value = value;
+  PROMPT_CACHE.at = now;
+  return value;
 }
 
 // Transient errors we retry with exponential backoff: 429 rate limit, 5xx,

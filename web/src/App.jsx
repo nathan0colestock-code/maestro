@@ -3,6 +3,7 @@ import Capture from './Capture.jsx';
 import Dashboard from './Dashboard.jsx';
 import Answer from './Answer.jsx';
 import Features from './Features.jsx';
+import Recommend from './Recommend.jsx';
 import Login from './Login.jsx';
 import { getPassword, clearPassword, apiFetch } from './auth.js';
 import './App.css';
@@ -39,6 +40,7 @@ export default function App() {
       else if (e.key === '2') setTab('features');
       else if (e.key === '3') setTab('answer');
       else if (e.key === '4') setTab('dashboard');
+      else if (e.key === '5') setTab('recommend');
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -63,6 +65,7 @@ export default function App() {
       badge: pendingQuestions > 0,
     },
     { id: 'dashboard', icon: '⊞', label: 'Projects', shortcut: '4' },
+    { id: 'recommend', icon: '💡', label: 'Ideas',    shortcut: '5' },
   ];
 
   return (
@@ -98,6 +101,7 @@ export default function App() {
         {tab === 'features'  && <Features />}
         {tab === 'dashboard' && <Dashboard onLogout={logout} />}
         {tab === 'answer'    && <Answer />}
+        {tab === 'recommend' && <Recommend />}
       </main>
     </div>
   );

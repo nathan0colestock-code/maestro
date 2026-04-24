@@ -1022,6 +1022,33 @@ app.post('/api/gloss/voice', auth, async (req, res) => {
   }
 });
 
+// POST /api/worker/stop-hook — real-time worker exit notification from the
+// Claude Code Stop hook (local/hooks/stop.js). Updates the most recent
+// running worker_run for (project, session) with final tokens/status so
+// the dashboard doesn't wait for onEnd.
+app.post('/api/worker/stop-hook', auth, (req, res) => {
+  const { session_id, project_name, ended_at, status, tokens_in, tokens_out } = req.body || {};
+  if (!session_id || !project_name) return res.status(400).json({ error: 'session_id and project_name required' });
+  const row = db.prepare(`
+    SELECT run_id FROM worker_runs
+    WHERE session_id = ? AND project_name = ? AND status = 'running'
+    ORDER BY started_at DESC LIMIT 1
+  `).get(session_id, project_name);
+  if (!row) return res.json({ ok: true, matched: 0 });
+  db.prepare(`
+    UPDATE worker_runs
+       SET ended_at = COALESCE(?, ended_at),
+           status = COALESCE(?, status),
+           tokens_in = COALESCE(?, tokens_in),
+           tokens_out = COALESCE(?, tokens_out)
+     WHERE run_id = ?
+  `).run(ended_at || null, status || null,
+         tokens_in == null ? null : Number(tokens_in),
+         tokens_out == null ? null : Number(tokens_out),
+         row.run_id);
+  res.json({ ok: true, matched: 1, run_id: row.run_id });
+});
+
 // ── Self-improvement loop endpoints ───────────────────────────────────────
 // Power the nightly analyst (local/improvement-agent.js) and the PWA's
 // "Suggest improvement" surface. See plan: elegant-napping-fox.md.

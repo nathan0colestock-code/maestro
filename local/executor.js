@@ -2,18 +2,13 @@ import { exec as execCallback } from 'child_process';
 import { promisify } from 'util';
 import { appendTask, appendNote, appendDocNote } from './doc-updater.js';
 import { startWorker } from './worker.js';
+import { PROJECTS } from './project-scanner.js';
 
 const exec = promisify(execCallback);
 
-const PROJECT_PATHS = {
-  flock: '/Users/nathancolestock/flock',
-  gloss: '/Users/nathancolestock/gloss',
-  tend: '/Users/nathancolestock/tend',
-  comms: '/Users/nathancolestock/comms',
-  maestro: '/Users/nathancolestock/maestro',
-  scribe: '/Users/nathancolestock/scribe',
-  black: '/Users/nathancolestock/black',
-};
+// Derived from the single source of truth in project-scanner.js so a new
+// project added there can't silently break dispatch.
+const PROJECT_PATHS = Object.fromEntries(PROJECTS.map(p => [p.name, p.path]));
 
 // Suite deployment map: project name → Fly.io app name. Used by the deployer
 // when closing the overnight loop. Projects not in this map won't auto-deploy
@@ -162,18 +157,51 @@ Create a branch named \`${branch}\` and implement all tasks on it. Commit each t
 
 async function mergeOne(projectPath, branchName) {
   await exec(`cd "${projectPath}" && git fetch --all --quiet || true`);
-  const { stdout: curBranch } = await exec(`cd "${projectPath}" && git rev-parse --abbrev-ref HEAD`);
-  if (curBranch.trim() !== 'main') {
-    await exec(`cd "${projectPath}" && git checkout main`);
+
+  // Stash any stray edits (e.g. tasks.md breadcrumbs, parallel-chat work)
+  // before merging, then pop afterwards. This keeps the overnight pipeline
+  // unblocked when something else dirtied the tree.
+  const stashLabel = `maestro-merge-${Date.now()}`;
+  const { stdout: dirty } = await exec(`cd "${projectPath}" && git status --porcelain`);
+  let stashed = false;
+  if (dirty.trim()) {
+    await exec(`cd "${projectPath}" && git stash push -u -m "${stashLabel}"`);
+    stashed = true;
   }
-  const { stdout: status } = await exec(`cd "${projectPath}" && git status --porcelain`);
-  if (status.trim()) throw new Error(`working tree not clean in ${projectPath}`);
-  // Only merge if the branch actually exists in this repo (peer repos may have
-  // no changes and therefore no maestro branch).
-  const { stdout: hasBranch } = await exec(`cd "${projectPath}" && git branch --list ${branchName}`);
-  if (!hasBranch.trim()) return { skipped: true };
-  await exec(`cd "${projectPath}" && git merge --no-ff --no-edit ${branchName}`);
-  return { skipped: false };
+
+  let mergeErr = null;
+  let result;
+  try {
+    const { stdout: curBranch } = await exec(`cd "${projectPath}" && git rev-parse --abbrev-ref HEAD`);
+    if (curBranch.trim() !== 'main') {
+      await exec(`cd "${projectPath}" && git checkout main`);
+    }
+    const { stdout: hasBranch } = await exec(`cd "${projectPath}" && git branch --list ${branchName}`);
+    if (!hasBranch.trim()) {
+      result = { skipped: true };
+    } else {
+      await exec(`cd "${projectPath}" && git merge --no-ff --no-edit ${branchName}`);
+      result = { skipped: false };
+    }
+  } catch (err) {
+    mergeErr = err;
+    await exec(`cd "${projectPath}" && git merge --abort`).catch(() => {});
+  } finally {
+    if (stashed) {
+      try {
+        await exec(`cd "${projectPath}" && git stash pop`);
+      } catch (err) {
+        console.warn(
+          `[merge] post-merge stash pop conflicted in ${projectPath} — ` +
+          `stash "${stashLabel}" kept; recover with \`git -C ${projectPath} stash list\`. ` +
+          `err: ${err.stderr?.toString() || err.message}`
+        );
+      }
+    }
+  }
+
+  if (mergeErr) throw mergeErr;
+  return result;
 }
 
 // Local git merge across primary + any extra projects. No push.

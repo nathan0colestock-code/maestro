@@ -103,15 +103,37 @@ export async function branchExists(projectPath, branchName) {
 // Checkout a branch in a repo (used before runProjectTests on a feature-set branch).
 // Restores the repo to `main` afterwards via the returned restore() callback.
 export async function checkoutBranch(projectPath, branchName) {
+  const stashLabel = `maestro-checkout-${Date.now()}`;
+  let stashed = false;
   try {
     const { stdout: before } = await exec(
       `cd "${projectPath}" && git rev-parse --abbrev-ref HEAD`,
       { timeout: 10_000 }
     );
-    await exec(
-      `cd "${projectPath}" && git checkout ${branchName}`,
-      { timeout: 30_000 }
+    // Stash stray edits so the checkout doesn't fail on dirty tree.
+    const { stdout: dirty } = await exec(
+      `cd "${projectPath}" && git status --porcelain`,
+      { timeout: 10_000 }
     );
+    if (dirty.trim()) {
+      await exec(
+        `cd "${projectPath}" && git stash push -u -m "${stashLabel}"`,
+        { timeout: 15_000 }
+      );
+      stashed = true;
+    }
+    try {
+      await exec(
+        `cd "${projectPath}" && git checkout ${branchName}`,
+        { timeout: 30_000 }
+      );
+    } catch (err) {
+      // Unwind the stash if checkout fails so the caller sees their tree back.
+      if (stashed) {
+        await exec(`cd "${projectPath}" && git stash pop`, { timeout: 15_000 }).catch(() => {});
+      }
+      throw err;
+    }
     return {
       ok: true,
       previousBranch: before.trim(),
@@ -120,6 +142,15 @@ export async function checkoutBranch(projectPath, branchName) {
           `cd "${projectPath}" && git checkout ${before.trim()}`,
           { timeout: 30_000 }
         ).catch(() => {});
+        if (stashed) {
+          await exec(`cd "${projectPath}" && git stash pop`, { timeout: 15_000 }).catch(err => {
+            console.warn(
+              `[checkout] post-test stash pop conflicted in ${projectPath} — ` +
+              `stash "${stashLabel}" kept; recover with \`git -C ${projectPath} stash list\`. ` +
+              `err: ${err.stderr?.toString() || err.message}`
+            );
+          });
+        }
       },
     };
   } catch (err) {

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Nightly improvement agent — fires at 23:00 local. Pulls telemetry + user
+  feature recommendations, writes ranked suggestions to /api/nightly-summary
+  and appends to tasks.md for morning review.
+
+  Install:
+    cp local/launchd/com.maestro.improvement.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.maestro.improvement.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.maestro.improvement</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/nathancolestock/maestro/local/launchd/run-improvement.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/nathancolestock/maestro</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>23</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/nathancolestock/Library/Logs/suite/maestro-improvement.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/nathancolestock/Library/Logs/suite/maestro-improvement.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <!-- Dry-run default. Flip MAESTRO_AUTO_PR=true only after a week of
+         review per plan (elegant-napping-fox.md). -->
+    <key>MAESTRO_AUTO_PR</key>
+    <string>false</string>
+  </dict>
+</dict>
+</plist>

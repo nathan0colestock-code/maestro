@@ -1,14 +1,14 @@
 # Maestro
 
-The **autonomous orchestration layer** for a five-app personal suite. Maestro turns a voice-memo or iPhone-PWA capture into deployed, tested code that you wake up to in the morning.
+You describe a feature you want built — by voice on your phone or by typing — and Maestro handles the rest overnight. It writes the code, runs the tests, and deploys it to production. In the morning you wake up to either a green "deployed" or a clear explanation of why it stopped.
 
-Part of a five-app personal suite: [gloss](https://github.com/nathan0colestock-code/gloss) · [comms](https://github.com/nathan0colestock-code/comms) · [scribe](https://github.com/nathan0colestock-code/scribe) · [black](https://github.com/nathan0colestock-code/black)
+It orchestrates a five-app personal suite: [gloss](https://github.com/nathan0colestock-code/gloss) · [comms](https://github.com/nathan0colestock-code/comms) · [scribe](https://github.com/nathan0colestock-code/scribe) · [black](https://github.com/nathan0colestock-code/black)
 
 ![Maestro PWA — project dashboard showing live worker status and overnight queue](docs/screenshots/dashboard.png)
 
 ---
 
-The flow, every night:
+## How it works
 
 ```
  iPhone PWA capture  ──▶  cloud intake
@@ -19,21 +19,18 @@ The flow, every night:
                               ▼
                       feature set queued for overnight run
                               │
-                              ▼  (23:00 local, or catchup on next open)
-                    local daemon picks up → spawns `claude -p` worker in the right repo
+                              ▼  (23:00 local, or on next daemon open)
+                    local daemon → spawns `claude -p` worker in the right repo
                               │
                               ▼
                     worker implements on a branch, runs tests
                               │
                               ▼
-                    tests green  →  merge to main  →  fly deploy  →  health check
-                              │                                           │
-                              ▼                                           ▼
-                   tests red / deploy bad:                     feature set = merged_and_deployed
-                   revert, mark for you to review
-                              │
-                              ▼
-                   morning: iPhone PWA shows green/red per project
+                    tests green  →  merge  →  fly deploy  →  health check
+                              │                                    │
+                              ▼                                    ▼
+                   tests red / deploy bad:              merged_and_deployed ✓
+                   revert, mark for review
 ```
 
 ---
@@ -42,10 +39,10 @@ The flow, every night:
 
 | Component | Where | What |
 |---|---|---|
-| **cloud** | Fly.io, `cloud/` | REST API for capture intake, feature-set state, worker pings; serves the PWA dashboard |
-| **web** | `web/` (PWA) | iPhone home-screen app for dropping captures and watching project health. Works offline (IndexedDB queue replays on reconnect) |
-| **local daemon** | user's laptop (`local/`, `com.maestro.daemon.plist` LaunchAgent) | Polls cloud, spawns Claude workers in project repos, runs the test + merge + deploy pipeline |
-| **workers** | ephemeral `claude -p` sessions | Do the actual coding on a branch; return a plain-language summary |
+| **cloud** | Fly.io, `cloud/` | REST API for capture intake, feature-set state, worker pings; serves the PWA |
+| **web** | `web/` (PWA) | iPhone home-screen app for drops and fleet health. Works offline; IndexedDB queue replays on reconnect |
+| **local daemon** | your laptop, `local/`, registered as a LaunchAgent | Polls cloud, spawns Claude workers, runs the test + merge + deploy pipeline |
+| **workers** | ephemeral `claude -p` sessions | Implement on a branch, run tests, return a plain-language summary |
 
 The daemon is the only piece with git write access. The cloud never touches repos.
 
@@ -53,12 +50,10 @@ The daemon is the only piece with git write access. The cloud never touches repo
 
 ## Stack
 
-- Node 20
-- SQLite (cloud), better-sqlite3
-- Express (cloud API)
+- Node 20, Express, SQLite (cloud)
 - React + Vite (web PWA)
-- Google Gemini (router + synthesis)
-- Anthropic Claude CLI (workers)
+- Google Gemini (router, nightly analyst, synthesis)
+- Anthropic Claude CLI (`claude -p` workers)
 - Deployed to [Fly.io](https://fly.io)
 - SQLite replicated to Cloudflare R2 via [Litestream](https://litestream.io)
 
@@ -68,95 +63,120 @@ The daemon is the only piece with git write access. The cloud never touches repo
 
 ### Cloud
 ```bash
-cd cloud
-npm install
-cp .env.example .env     # set MAESTRO_SECRET, MAESTRO_PASSWORD, GEMINI_API_KEY
+cd cloud && npm install
+cp .env.example .env     # MAESTRO_SECRET, MAESTRO_PASSWORD, GEMINI_API_KEY
 node server.js
 ```
 
 ### Local daemon
 ```bash
-cd local
-npm install
-cp .env.example .env     # set MAESTRO_CLOUD_URL, MAESTRO_SECRET, GEMINI_API_KEY, AUTO_MERGE_ON_TESTS_PASS
+cd local && npm install
+cp .env.example .env     # MAESTRO_CLOUD_URL, MAESTRO_SECRET, GEMINI_API_KEY, AUTO_MERGE_ON_TESTS_PASS
 node daemon.js
-# or register as a LaunchAgent — see local/README.md
+# or register as a LaunchAgent — see local/launchd/
 ```
 
 ### Web PWA
 ```bash
-cd web
-npm install
+cd web && npm install
 npm run dev              # dev on :5173
-npm run build            # produces web/dist/ served by cloud/server.js
+npm run build            # outputs to cloud/public/
 ```
 
 ---
 
 ## API (cloud)
 
-- `POST /api/capture` — drop a capture (PWA calls this)
-- `GET /api/feature-sets` — list feature sets
-- `GET /api/feature-sets/:id` — single feature set (daemon polls this between pipeline phases for the cancel flag)
-- `POST /api/feature-sets/:id/status` — worker/daemon updates
-- `POST /api/feature-sets/:id/cancel` — user-initiated stop of a running pipeline; daemon aborts at the next phase boundary with status=`cancelled`
-- `POST /api/worker/*` — worker lifecycle pings
-- `GET /api/projects` — per-project rollup incl. last deploy status
+Auth: `Authorization: Bearer <SUITE_API_KEY>` or `X-Maestro-Password`.
+
+### Captures & feature sets
+- `POST /api/capture` — drop a capture (PWA → cloud)
+- `GET /api/feature-sets` — list all feature sets
+- `GET /api/feature-sets/:id` — single feature set; daemon polls between phases for the cancel flag
+- `POST /api/feature-sets/:id/status` — worker/daemon phase update
+- `POST /api/feature-sets/:id/cancel` — abort cleanly at the next phase boundary
+- `POST /api/feature-sets/:id/absorb` — collapse a sibling feature set into this one
+- `POST /api/feature-sets/:id/clarified` — mark clarity-checked before queueing
+- `GET /api/feature-sets/stats?project=X&days=7` — per-phase timing stats (p50, p95, mean, stddev, failure rate)
+
+### Workers & pipeline
+- `POST /api/worker/*` — worker lifecycle pings (start, heartbeat, end)
+- `POST /api/worker/stop-hook` — real-time exit signal from Claude Code's Stop hook; captures summary/cost/tokens immediately
+- `GET /api/questions` — clarifying questions a worker raised mid-task
+- `POST /api/questions/:id/answer` — answer a worker's question so it can continue
+- `POST /api/tasks/:id/requeue` — retry a failed task
+
+### Projects & telemetry
+- `GET /api/projects` — per-project rollup: deploy status, active workers, open tasks
 - `GET /api/status` — suite-standard status envelope
+- `POST /api/suite-telemetry` — daemon pushes per-app metrics (uptime, last deploy, queue depth)
+- `POST /api/routing-feedback` — flag a misroute for the nightly analyst
 
-Auth: `X-Maestro-Password` (legacy) or `Authorization: Bearer <SUITE_API_KEY>` (for inter-suite status polling).
+### Nightly self-improvement
+- `POST /api/nightly-summary` — Gemini synthesises timing regressions, routing accuracy, and failure patterns
+- `GET /api/nightly-summary/latest` — latest analyst output
+- `GET /api/recommendations` — feature suggestions derived from feedback and nightly analysis
+- `POST /api/synthesis/merge` — Gemini deduplication pass across pending captures
 
-### Self-improving pipeline stats (2026-04)
+### Gloss voice proxy
+- `POST /api/gloss/voice` — bridges a voice transcript from the PWA into Gloss's ingest pipeline
 
-Every `runMergePipeline` execution records `phase_timings` onto the feature set — per-phase `{ started_at, ended_at, duration_ms, status }`. Aggregate stats (p50, p95, mean, stddev, failure_rate per phase per project, 7-day lookback) are exposed via `GET /api/feature-sets/stats?project=X&days=7` and consumed by maestro itself:
+---
 
-- **Router Gemini prompt** gets a "Historical timing for each project" block — so routing decisions weight how expensive a deploy target is.
-- **Worker prompts** carry "expected test runtime for this project" — so `claude -p` doesn't panic on legitimately slow suites.
-- **Dynamic `WORKER_MAX_MS`** is `max(30 min, p95 × 3)` per-project — fast repos get tight budgets, slow ones get runway.
-- **Regression flags** — if a phase runs >2σ above the 7-day mean (n ≥ 5), the feature set's note includes `regression: <phase> X.Xx slower than usual` so it's visible in the deploy indicator.
+## Pipeline hardening
 
-This is a **self-improvement signal**, not a user dashboard. The data flows into maestro's own decisions without surfacing a new UI.
+Four phases run atomically per feature set:
 
-### Pipeline hardening (2026-04)
+1. **Pre-merge tests** — primary AND every extra repo (cross-app sets). Red in any halts with `test_failed`.
+2. **Merge** — `git merge --no-ff` across all repos; SHA verified after push.
+3. **Deploy** — sequential per project. If any fails, all successful siblings are rolled back. Status: `deploy_failed_reverted`.
+4. **Integration tests** — post-deploy smoke against the live fleet.
 
-The overnight loop (`local/daemon.js::runMergePipeline`) now runs all four phases atomically per feature set:
+Workers have a wall-clock guard (`WORKER_MAX_MS`), dynamically set to `max(30 min, p95 × 3)` per project.
 
-1. **Pre-merge tests** — run in the **primary AND every extra repo** that carries the branch (integration sets). A red test in any participant halts the whole pipeline with `status=test_failed`.
-2. **Merge** — local `git merge --no-ff` across primary + extras; push to origin.
-3. **Deploy** — sequential per project with `/api/status` health check. If any deploy fails, **every successful sibling is also rolled back** (fly rollback + git revert) so main doesn't drift across the repos that already merged. Status=`deploy_failed_reverted`.
-4. **Integration tests** — post-deploy smoke against the just-shipped fleet.
+---
 
-Revert pushes are **verified** — after `git push origin main`, the daemon fetches and compares `origin/main` SHA against local HEAD. If they diverge (push failed, pre-commit hook on remote, etc.), a prominent warning is logged so the bad merge can't silently drift back in.
+## Self-improving pipeline stats
 
-Workers have a **wall-clock guard** (`WORKER_MAX_MS`, default 60 min) so a stuck `claude -p` can't lock the project slot indefinitely.
+Every pipeline run records per-phase `{ started_at, ended_at, duration_ms, status }`. These feed back into:
 
-Cancel: `POST /api/feature-sets/:id/cancel` sets a flag; `checkCancel` polls between every pipeline phase and aborts cleanly.
+- **Router prompt** — weights routing toward cheaper deploy targets
+- **Worker prompts** — carry expected test runtime so `claude -p` calibrates its budget
+- **Dynamic `WORKER_MAX_MS`** — per-project, not a global constant
+- **Regression flags** — appear when a phase runs >2σ above the 7-day mean
+
+---
+
+## GitHub integration
+
+`local/github.js` enriches routing with live PR/issue state. Add `fixes #123` to a capture and the router fetches the current status, labels, and reviewer state before routing.
+
+Requires `GITHUB_TOKEN` (fine-grained, issues + PR read). Without it, refs are parsed but returned as best-effort stubs.
 
 ---
 
 ## Deploy
 
 ```bash
-cd cloud
-fly deploy
+cd cloud && fly deploy
 ```
 
 ---
 
 ## Suite siblings
 
-Maestro is the **orchestration** node of a five-app personal suite — the only app whose job is to modify the other apps. Independent processes, all on [Fly.io](https://fly.io), all backed up to R2 via Litestream.
+Maestro is the **orchestration** node of a five-app personal suite. Independent processes, all on [Fly.io](https://fly.io), all backed up to R2 via Litestream.
 
-| App | Role | How Maestro interacts |
+| App | What it does | How Maestro interacts |
 |---|---|---|
-| **[comms](https://github.com/nathan0colestock-code/comms)** | iMessage + Gmail + contacts | Dispatches feature sets targeting comms; polls `/api/status` |
-| **[gloss](https://github.com/nathan0colestock-code/gloss)** | Personal knowledge graph | Dispatches feature sets targeting gloss; polls `/api/status` |
-| **[scribe](https://github.com/nathan0colestock-code/scribe)** | Collaborative document editor | Dispatches feature sets targeting scribe; polls `/api/status` |
-| **[black](https://github.com/nathan0colestock-code/black)** | Personal file search | Dispatches feature sets targeting black; polls `/api/status` |
+| **[gloss](https://github.com/nathan0colestock-code/gloss)** | Turns paper journal scans into a searchable knowledge graph | Dispatches feature sets; polls `/api/status`; proxies voice via `/api/gloss/voice` |
+| **[comms](https://github.com/nathan0colestock-code/comms)** | Collects iMessages + Gmail into a private local database | Dispatches feature sets; polls `/api/status` |
+| **[scribe](https://github.com/nathan0colestock-code/scribe)** | Collaborative document editor linked to your journal | Dispatches feature sets; polls `/api/status` |
+| **[black](https://github.com/nathan0colestock-code/black)** | Personal search across Drive, Evernote, and iCloud | Dispatches feature sets; polls `/api/status` |
 
-Every app exposes `GET /api/status` → `{ app, version, ok, uptime_seconds, metrics }`, Bearer-authed. Maestro uses the shared `SUITE_API_KEY` to poll all five and surfaces their health in the PWA dashboard.
+Every app exposes `GET /api/status` → `{ app, version, ok, uptime_seconds, metrics }`, Bearer-authed with the shared `SUITE_API_KEY`.
 
-**Cross-app feature sets** are supported: a single capture like "add a link from gloss sidebar to the comms dashboard" produces a feature set with `extra_projects: ['comms']`, the worker gets `--add-dir` for the comms repo, and writes a shared contract spec into `docs/INTEGRATIONS/<slug>.md` in the primary repo before coding either side.
+**Cross-app feature sets:** a capture like "link gloss sidebar to the comms dashboard" produces a set with `extra_projects: ['comms']`. The worker gets `--add-dir` for comms and writes a shared integration contract into `docs/INTEGRATIONS/<slug>.md` before coding either side.
 
 ---
 

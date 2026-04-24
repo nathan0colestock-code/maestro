@@ -2,8 +2,10 @@ import { readFile, access } from 'fs/promises';
 import { join } from 'path';
 import { execSync } from 'child_process';
 
-// Projects to track — extend this list as you add more apps
-const PROJECTS = [
+// Projects to track — single source of truth. local/executor.js derives its
+// PROJECT_PATHS map from this list so there's no drift when a new project
+// is added.
+export const PROJECTS = [
   { name: 'flock', path: '/Users/nathancolestock/flock' },
   { name: 'gloss', path: '/Users/nathancolestock/gloss' },
   { name: 'tend', path: '/Users/nathancolestock/tend' },
