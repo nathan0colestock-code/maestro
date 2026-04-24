@@ -186,14 +186,59 @@ describe('nightly-agent dispatch', () => {
     assert.deepEqual(out.ships, []);
   });
 
-  test('exposes ships array alongside workers in output shape', () => {
+  test('exposes ships and cleanups arrays alongside workers in output shape', () => {
     const plan = join(tmpDir, 'plan.json');
     writeFileSync(plan, JSON.stringify({ routes: [{ project: 'nonexistent', task: 't' }] }));
     const r = runAgent(['dispatch', plan]);
     assert.equal(r.status, 0);
     const out = JSON.parse(r.stdout);
     assert.ok('ships' in out, 'ships key must be present on every dispatch');
+    assert.ok('cleanups' in out, 'cleanups key must be present on every dispatch');
     assert.ok(Array.isArray(out.ships));
+    assert.ok(Array.isArray(out.cleanups));
+  });
+});
+
+describe('removeIdeaFromNote', () => {
+  test('exact quote: removes and collapses blank lines', async () => {
+    const { removeIdeaFromNote } = await import('../local/nightly-agent.js');
+    const note = [
+      '# Tonight',
+      '',
+      '## 1. black-hole — delete dead imports',
+      'Remove pricing.js import.',
+      '',
+      '## 2. comms — dedup hash',
+      'Field compare.',
+      '',
+    ].join('\n');
+    const quote = '## 1. black-hole — delete dead imports\nRemove pricing.js import.\n';
+    const out = removeIdeaFromNote(note, quote);
+    assert.match(out, /# Tonight/, 'preamble must survive');
+    assert.doesNotMatch(out, /black-hole/, 'shipped idea must be gone');
+    assert.match(out, /## 2\. comms — dedup hash/, 'remaining idea must stay');
+    assert.doesNotMatch(out, /\n{3,}/, 'must not leave triple blank lines');
+  });
+
+  test('whitespace-flexible fallback matches when exact quote differs', async () => {
+    const { removeIdeaFromNote } = await import('../local/nightly-agent.js');
+    const note = '# Hi\n\n## 1.  double  spaces\nbody\n\n## 2. other\nbody2\n';
+    const quote = '## 1. double spaces\nbody';
+    const out = removeIdeaFromNote(note, quote);
+    assert.ok(out && !out.includes('double'), 'fuzzy match should still excise');
+  });
+
+  test('returns null when quote does not match', async () => {
+    const { removeIdeaFromNote } = await import('../local/nightly-agent.js');
+    const note = 'something completely different';
+    const out = removeIdeaFromNote(note, 'not in the note');
+    assert.equal(out, null);
+  });
+
+  test('empty inputs are safe', async () => {
+    const { removeIdeaFromNote } = await import('../local/nightly-agent.js');
+    assert.equal(removeIdeaFromNote('', 'x'), '');
+    assert.equal(removeIdeaFromNote('x', ''), 'x');
   });
 });
 

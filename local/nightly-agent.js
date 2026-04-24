@@ -106,6 +106,64 @@ async function bearerPost(url, body, timeoutMs = 10_000) {
   }
 }
 
+async function bearerPatch(url, body, timeoutMs = 10_000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${SUITE_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function bearerDelete(url, timeoutMs = 10_000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${SUITE_API_KEY}` },
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Remove a substring from note content while preserving readability.
+// Normalizes consecutive blank lines and trims leading/trailing whitespace
+// that would otherwise accumulate after excisions.
+export function removeIdeaFromNote(content, ideaQuote) {
+  if (!content || !ideaQuote) return content;
+  // Try exact match first, then whitespace-flexible fallback.
+  let out = content;
+  if (out.includes(ideaQuote)) {
+    out = out.replace(ideaQuote, '');
+  } else {
+    // Build a regex where runs of whitespace in the quote match any whitespace.
+    const escaped = ideaQuote.trim()
+      .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      .replace(/\s+/g, '\\s+');
+    const rx = new RegExp(escaped);
+    if (rx.test(out)) out = out.replace(rx, '');
+    else return null; // no match — caller should skip excision
+  }
+  // Collapse 3+ consecutive newlines to 2, trim edges
+  return out.replace(/\n{3,}/g, '\n\n').trim() + (content.endsWith('\n') ? '\n' : '');
+}
+
 async function readJsonMaybe(path, fallback = null) {
   try { return JSON.parse(await readFile(path, 'utf8')); }
   catch { return fallback; }
@@ -428,7 +486,7 @@ async function cmdDispatch(planPath) {
       taskRoutes.map(r => r.source_capture_id).filter(Boolean)
     ));
     return new Promise(resolve => {
-      const out = { project: name, status: 'pending', run_id: null, source_capture_ids: sourceCaptureIds };
+      const out = { project: name, status: 'pending', run_id: null, source_capture_ids: sourceCaptureIds, _routes: taskRoutes };
       const started = startWorker({
         projectName: name,
         projectPath: proj.path,
@@ -472,10 +530,20 @@ async function cmdDispatch(planPath) {
     }
   }
 
-  // Annotate originating Gloss captures ONLY when the change actually shipped
-  // (tests passed, merged, pushed, and — if applicable — deployed). Otherwise
-  // annotate with the truthful status so Nathan isn't told "shipped" for code
-  // that's sitting on a feature branch.
+  // Build a route-level shipped map so note cleanup can tell per-idea what
+  // landed live vs. what stayed on a branch. A route "shipped" iff its
+  // project went all the way through deploy.
+  const shippedByRoute = new Map(); // route → true
+  for (const r of results) {
+    const shipEntry = ships.find(s => s.run_id === r.run_id);
+    const routeShipped = Boolean(shipEntry?.ok && shipEntry.deployed);
+    for (const route of (r._routes || [])) {
+      shippedByRoute.set(route, routeShipped);
+    }
+  }
+
+  // Annotate originating Gloss captures with the TRUE status of each route
+  // ("deployed", "merged but not deployed", "built but ship failed", etc.).
   const annotations = [];
   for (const r of results) {
     const shipEntry = ships.find(s => s.run_id === r.run_id);
@@ -505,16 +573,81 @@ async function cmdDispatch(planPath) {
     }
   }
 
+  // Note cleanup: when a note's ideas have all been deployed, delete it. When
+  // some have been deployed and others haven't, excise the shipped portions
+  // so only the un-shipped work remains. Only applies to `note:` captures —
+  // pages have richer provenance we don't touch.
+  const cleanups = [];
+  const routesByNote = new Map();
+  for (const route of plan.routes) {
+    const id = route.source_capture_id;
+    if (!id || !id.startsWith('note:')) continue;
+    if (!routesByNote.has(id)) routesByNote.set(id, []);
+    routesByNote.get(id).push(route);
+  }
+
+  for (const [noteCaptureId, noteRoutes] of routesByNote) {
+    const shippedRoutes = noteRoutes.filter(r => shippedByRoute.get(r));
+    if (shippedRoutes.length === 0) continue; // nothing shipped — leave note alone
+
+    const noteId = noteCaptureId.slice('note:'.length);
+
+    // All ideas shipped → delete the whole note
+    if (shippedRoutes.length === noteRoutes.length) {
+      try {
+        await bearerDelete(`${GLOSS_URL}/api/markdown-drafts/${encodeURIComponent(noteId)}`);
+        cleanups.push({ capture_id: noteCaptureId, action: 'deleted', shipped: shippedRoutes.length });
+      } catch (err) {
+        cleanups.push({ capture_id: noteCaptureId, action: 'delete_failed', error: err.message });
+      }
+      continue;
+    }
+
+    // Some ideas shipped → excise just those portions, keep the rest
+    try {
+      const fresh = await bearerFetch(`${GLOSS_URL}/api/markdown-drafts/${encodeURIComponent(noteId)}`);
+      let content = fresh.content || '';
+      const excised = [];
+      const failedExcisions = [];
+      for (const r of shippedRoutes) {
+        if (!r.idea_quote) { failedExcisions.push('no_idea_quote'); continue; }
+        const next = removeIdeaFromNote(content, r.idea_quote);
+        if (next === null) { failedExcisions.push(r.idea_quote.slice(0, 40)); continue; }
+        content = next;
+        excised.push(r.idea_quote.slice(0, 60));
+      }
+      if (excised.length === 0) {
+        cleanups.push({ capture_id: noteCaptureId, action: 'excise_skipped', reason: 'no idea_quote matched', failed: failedExcisions });
+        continue;
+      }
+      await bearerPatch(`${GLOSS_URL}/api/markdown-drafts/${encodeURIComponent(noteId)}`, { content, date: fresh.date });
+      cleanups.push({
+        capture_id: noteCaptureId,
+        action: 'excised',
+        shipped: shippedRoutes.length,
+        remaining: noteRoutes.length - shippedRoutes.length,
+        failed_excisions: failedExcisions,
+      });
+    } catch (err) {
+      cleanups.push({ capture_id: noteCaptureId, action: 'cleanup_failed', error: err.message });
+    }
+  }
+
   if (plan.update_cursor_to) {
     await writeJson(CURSOR_PATH, { since: plan.update_cursor_to });
   }
 
+  // Strip the internal _routes reference before serializing so the output
+  // stays compact for the parent session.
+  const workersOut = results.map(({ _routes, ...rest }) => rest);
+
   console.log(JSON.stringify({
     routes_received: plan.routes.length,
     routes_skipped: skipped,
-    workers: results,
+    workers: workersOut,
     ships,
     annotations,
+    cleanups,
     cursor_updated_to: plan.update_cursor_to || null,
   }, null, 2));
 }
@@ -546,27 +679,30 @@ async function cmdSyncRules() {
 
 // ── main ──────────────────────────────────────────────────────────────────────
 
-const cmd = process.argv[2];
-
 const commands = {
   fetch: cmdFetch,
   dispatch: () => cmdDispatch(process.argv[3]),
   'sync-rules': cmdSyncRules,
 };
 
-(async () => {
-  if (!commands[cmd]) {
-    console.log(`Usage:
+// Only run the CLI when invoked directly, not when imported by tests.
+const invokedDirectly = import.meta.url === `file://${process.argv[1]}`;
+if (invokedDirectly) {
+  const cmd = process.argv[2];
+  (async () => {
+    if (!commands[cmd]) {
+      console.log(`Usage:
   node local/nightly-agent.js fetch              — dump context (writes /tmp/maestro-fetch-<date>.json)
   node local/nightly-agent.js dispatch <plan>    — execute a routing plan
   node local/nightly-agent.js sync-rules         — mirror CONSTITUTION.md → LESSONS.md
 `);
-    process.exit(cmd ? 2 : 0);
-  }
-  try {
-    await commands[cmd]();
-  } catch (err) {
-    console.error('Fatal:', err.message);
-    process.exit(1);
-  }
-})();
+      process.exit(cmd ? 2 : 0);
+    }
+    try {
+      await commands[cmd]();
+    } catch (err) {
+      console.error('Fatal:', err.message);
+      process.exit(1);
+    }
+  })();
+}
