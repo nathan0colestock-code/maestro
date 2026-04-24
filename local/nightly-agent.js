@@ -59,6 +59,26 @@ async function bearerFetch(url, timeoutMs = 15_000) {
   }
 }
 
+async function bearerPost(url, body, timeoutMs = 10_000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${SUITE_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function readJsonMaybe(path, fallback = null) {
   try { return JSON.parse(await readFile(path, 'utf8')); }
   catch { return fallback; }
@@ -222,8 +242,11 @@ async function cmdDispatch(planPath) {
     const proj = byName[name];
     const task = taskRoutes.map(r => `- ${r.task}`).join('\n');
     const context = taskRoutes.map(r => r.context).filter(Boolean).join('; ');
+    const sourceCaptureIds = Array.from(new Set(
+      taskRoutes.map(r => r.source_capture_id).filter(Boolean)
+    ));
     return new Promise(resolve => {
-      const out = { project: name, status: 'pending', run_id: null };
+      const out = { project: name, status: 'pending', run_id: null, source_capture_ids: sourceCaptureIds };
       const started = startWorker({
         projectName: name,
         projectPath: proj.path,
@@ -245,6 +268,24 @@ async function cmdDispatch(planPath) {
     });
   }));
 
+  // Annotate originating Gloss captures so Nathan sees what shipped.
+  const annotations = [];
+  for (const r of results) {
+    if (r.status !== 'done') continue;
+    for (const captureId of r.source_capture_ids || []) {
+      if (!captureId || typeof captureId !== 'string') continue;
+      try {
+        await bearerPost(
+          `${GLOSS_URL}/api/captures/${encodeURIComponent(captureId)}/annotate`,
+          { note: `shipped in ${r.project} (run ${r.run_id?.slice(0, 8) || '?'})` },
+        );
+        annotations.push({ capture_id: captureId, project: r.project, status: 'annotated' });
+      } catch (err) {
+        annotations.push({ capture_id: captureId, project: r.project, status: 'annotate_failed', error: err.message });
+      }
+    }
+  }
+
   if (plan.update_cursor_to) {
     await writeJson(CURSOR_PATH, { since: plan.update_cursor_to });
   }
@@ -253,6 +294,7 @@ async function cmdDispatch(planPath) {
     routes_received: plan.routes.length,
     routes_skipped: skipped,
     workers: results,
+    annotations,
     cursor_updated_to: plan.update_cursor_to || null,
   }, null, 2));
 }
