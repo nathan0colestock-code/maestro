@@ -164,15 +164,75 @@ describe('runAutoPrNightly', () => {
       }
       return {};
     };
+    // Stub validator so the test doesn't call claude.
+    const validator = async (s) => ({ kept: s, dropped: [] });
     const r = await runAutoPrNightly({
       cloudApi, runClaude: async () => '', runGit: async () => {},
       runTests: async () => ({ ok: true }), gitChangedFiles: async () => [],
-      date: '2026-04-23', dryRun: true,
+      date: '2026-04-23', dryRun: true, validator,
     });
     assert.equal(r.blocked, 'max-prs-reached');
   });
 
   test('passes MIN_CONFIDENCE threshold constant', () => {
     assert.equal(MIN_CONFIDENCE, 0.75);
+  });
+});
+
+describe('auto-pr with validator', () => {
+  test('validator dropping all suggestions yields selected=0', async () => {
+    const cloudApi = async (method, path) => {
+      if (path === '/api/self-improvement/latest') {
+        return {
+          summary: {
+            self_improvements: [
+              { rank: 1, target_file: 'router.js', description: 'x',
+                effort_hours: 1, confidence: 0.9 },
+            ],
+          },
+        };
+      }
+      return {};
+    };
+    const validator = async (s) => ({
+      kept: [],
+      dropped: s.map(x => ({ ...x, validator: { decision: 'skip', reason: 'already done' } })),
+    });
+    const r = await runAutoPrNightly({
+      cloudApi, runClaude: async () => '', runGit: async () => {},
+      runTests: async () => ({ ok: true }), gitChangedFiles: async () => [],
+      date: '2026-04-23', dryRun: true, validator,
+    });
+    assert.equal(r.selected, 0);
+    assert.equal(r.validator_dropped, 1);
+  });
+
+  test('validator refines patch_hint; suggestion proceeds with new hint', async () => {
+    let capturedPlan = null;
+    const cloudApi = async (method, path) => {
+      if (path === '/api/self-improvement/latest') {
+        return {
+          summary: {
+            self_improvements: [
+              { rank: 1, target_file: 'router.js', description: 'x',
+                patch_hint: 'old hint', effort_hours: 1, confidence: 0.9 },
+            ],
+          },
+        };
+      }
+      if (path.startsWith('/api/self-improvement/budget')) return { prs_opened: 0, cost_usd: 0 };
+      return {};
+    };
+    const validator = async (s) => ({
+      kept: s.map(x => ({ ...x, patch_hint: 'REFINED HINT', validator: { decision: 'refine' } })),
+      dropped: [],
+    });
+    const r = await runAutoPrNightly({
+      cloudApi, runClaude: async () => '', runGit: async () => {},
+      runTests: async () => ({ ok: true }), gitChangedFiles: async () => [],
+      date: '2026-04-23', dryRun: true, validator,
+    });
+    assert.equal(r.results.length, 1);
+    assert.equal(r.results[0].plan.patch_hint, 'REFINED HINT');
   });
 });

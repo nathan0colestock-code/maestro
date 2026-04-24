@@ -9,6 +9,7 @@ import { runProjectTests, runIntegrationTests, checkoutBranch, branchExists } fr
 import { getProjectStats, detectRegression } from './pipeline-stats.js';
 import { runNightlyReflection, alreadyReflectedToday } from './nightly-reflect.js';
 import { matchThreadToSet } from './definition-gate.js';
+import { runCollectorOnce } from './log-collector.js';
 import { readFile } from 'fs/promises';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
@@ -38,6 +39,8 @@ let lastFullScan = 0;
 let lastSynthesis = 0;
 let lastClarity = 0;
 let lastNightlyKickoff = null; // YYYY-MM-DD string of last fire
+let lastLogCollection = 0;
+const LOG_COLLECTION_INTERVAL_MS = 60 * 60_000; // hourly
 
 function headers() {
   return {
@@ -654,6 +657,27 @@ async function tick() {
   await runClarity().catch(err => console.error('[clarity] tick error:', err.message));
   await runSynthesis().catch(err => console.error('[synth] tick error:', err.message));
   await maybeRunReflection().catch(err => console.error('[reflect] tick error:', err.message));
+  await maybeRunLogCollector().catch(err => console.error('[logs] tick error:', err.message));
+}
+
+// Pull suite_logs from each app hourly into maestro cloud's suite_logs
+// table so improvement-agent can mine warn/error patterns + slow endpoints.
+async function maybeRunLogCollector() {
+  const now = Date.now();
+  if (now - lastLogCollection < LOG_COLLECTION_INTERVAL_MS) return;
+  lastLogCollection = now;
+  const report = await runCollectorOnce({ cloudApi: api });
+  if (!report?.ok) {
+    console.warn('[logs] collector skipped:', report?.reason || 'unknown');
+    return;
+  }
+  const totals = report.apps.reduce((acc, a) => {
+    if (a.inserted) acc.inserted += a.inserted;
+    if (a.skipped) acc.skipped += 1;
+    if (a.error) acc.errored += 1;
+    return acc;
+  }, { inserted: 0, skipped: 0, errored: 0 });
+  console.log(`[logs] collected: ${totals.inserted} inserted across ${report.apps.length} apps (${totals.skipped} skipped, ${totals.errored} errored)`);
 }
 
 // Fire the self-reflection loop once per night after the queue fully settles.

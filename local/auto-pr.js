@@ -13,6 +13,7 @@
 //   - Never auto-merge.
 
 import { spawn } from 'child_process';
+import { validateAll } from './opus-validator.js';
 
 export const ALLOWLIST = [
   'local/router.js',
@@ -165,15 +166,33 @@ export async function processSuggestion(suggestion, {
  */
 export async function runAutoPrNightly({
   cloudApi, runClaude, runGit, runTests, gitChangedFiles, date, dryRun,
+  validator = validateAll,
 }) {
   const today = date || new Date().toISOString().slice(0, 10);
   const isDry = dryRun ?? (process.env.MAESTRO_SELF_IMPROVE_DRY !== 'false');
 
   const reflection = await cloudApi('GET', '/api/self-improvement/latest').catch(() => null);
   const suggestions = reflection?.summary?.self_improvements;
-  const selected = selectTopSuggestions(suggestions);
-  if (selected.length === 0) {
+  const shortlisted = selectTopSuggestions(suggestions, MAX_PRS_PER_NIGHT * 2);
+  if (shortlisted.length === 0) {
     return { ok: true, date: today, selected: 0, results: [] };
+  }
+
+  // Opus validator: re-read current code + recent commits, drop suggestions
+  // that are already done / no longer apply / too vague, and refine stale
+  // patch_hints. Fail-closed on parse errors. Logged, not surfaced to user.
+  const { kept, dropped } = await validator(shortlisted);
+  if (dropped.length) {
+    console.log(`[auto-pr] validator dropped ${dropped.length}: ${dropped.map(d => `${d.target_file}:${d.validator.decision}`).join(', ')}`);
+    await cloudApi('POST', '/api/self-improvement/validator-log', {
+      date: today,
+      dropped: dropped.map(d => ({ target: d.target_file, reason: d.validator.reason })),
+      refined: kept.filter(k => k.validator.decision === 'refine').map(k => ({ target: k.target_file, reason: k.validator.reason })),
+    }).catch(() => {});
+  }
+  const selected = kept.slice(0, MAX_PRS_PER_NIGHT);
+  if (selected.length === 0) {
+    return { ok: true, date: today, selected: 0, validator_dropped: dropped.length, results: [] };
   }
 
   const budget = await loadBudget(cloudApi, today);
