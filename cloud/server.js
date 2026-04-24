@@ -1053,11 +1053,6 @@ app.post('/api/worker/stop-hook', auth, (req, res) => {
 // Power the nightly analyst (local/improvement-agent.js) and the PWA's
 // "Suggest improvement" surface. See plan: elegant-napping-fox.md.
 
-function safeParseJson(s) {
-  if (s == null) return null;
-  try { return JSON.parse(s); } catch { return s; }
-}
-
 // GET /api/recommendations?status=new,clustered&target=maestro
 app.get('/api/recommendations', auth, (req, res) => {
   const { status, target } = req.query;
