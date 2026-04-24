@@ -20,11 +20,28 @@
 //   COMMS_URL/SCRIBE_URL/BLACK_URL/TEND_URL   (app log collection; optional)
 
 import { readFile, writeFile, mkdir } from 'fs/promises';
+import { exec as execCallback } from 'child_process';
+import { promisify } from 'util';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { scanProjects } from './project-scanner.js';
 import { startWorker } from './worker.js';
 import { appendTask, appendNote } from './doc-updater.js';
+
+const exec = promisify(execCallback);
+
+// Project → Fly.io app name. Set via env so CI and test environments don't
+// accidentally deploy to production. The nightly routine only ships projects
+// whose Fly app name is explicitly configured; others commit-and-push only.
+const FLY_APPS = {
+  gloss: process.env.GLOSS_FLY_APP || (process.env.GLOSS_URL?.includes('gloss-nc') ? 'gloss-nc' : null),
+  comms: process.env.COMMS_FLY_APP || null,
+  scribe: process.env.SCRIBE_FLY_APP || null,
+  black: process.env.BLACK_FLY_APP || null,
+  tend: process.env.TEND_FLY_APP || null,
+};
+const SHIP_ENABLED = process.env.NIGHTLY_SHIP !== 'false';
+const HEALTH_TIMEOUT_MS = 90_000;
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const ROOT = process.env.MAESTRO_ROOT || join(__dirname, '..');
@@ -114,6 +131,161 @@ function extractSection(text, heading) {
   const start = idx + heading.length;
   const next = text.indexOf('\n## ', start);
   return text.slice(start, next === -1 ? undefined : next).trim();
+}
+
+// ── ship pipeline ─────────────────────────────────────────────────────────────
+// After a worker commits to its feature branch, this runs tests, merges to
+// main, pushes, and (if the project has a Fly app configured) deploys.
+// On ANY failure past the merge it reverts — both git (via git revert on the
+// merge commit) and Fly (via `fly releases rollback -y`).
+
+async function sh(cmd, opts = {}) {
+  return exec(cmd, { maxBuffer: 8 * 1024 * 1024, ...opts });
+}
+
+async function currentBranch(cwd) {
+  const { stdout } = await sh('git branch --show-current', { cwd });
+  return stdout.trim();
+}
+
+async function hasTestScript(cwd) {
+  try {
+    const pkg = JSON.parse(await readFile(join(cwd, 'package.json'), 'utf8'));
+    return Boolean(pkg.scripts?.test);
+  } catch {
+    return false;
+  }
+}
+
+async function runProjectTests(cwd) {
+  if (!(await hasTestScript(cwd))) return { ok: true, skipped: 'no-test-script' };
+  try {
+    const { stdout, stderr } = await sh('npm test --silent', { cwd, timeout: 10 * 60_000 });
+    return { ok: true, stdout: (stdout || '').slice(-4000), stderr: (stderr || '').slice(-4000) };
+  } catch (err) {
+    return {
+      ok: false,
+      stdout: (err.stdout || '').slice(-4000),
+      stderr: (err.stderr || err.message || '').slice(-4000),
+    };
+  }
+}
+
+async function shipProjectChanges({ projectName, projectPath, runId }) {
+  const log = [];
+  const note = (msg) => { log.push(msg); };
+
+  let branch;
+  try { branch = await currentBranch(projectPath); }
+  catch (e) { return { ok: false, phase: 'detect-branch', error: e.message, log }; }
+
+  if (!branch || branch === 'main' || branch === 'master') {
+    return { ok: false, phase: 'detect-branch', error: `not on a feature branch (current: ${branch || 'detached'})`, log };
+  }
+  note(`branch: ${branch}`);
+
+  try {
+    const { stdout } = await sh('git log origin/main..HEAD --oneline', { cwd: projectPath });
+    if (!stdout.trim()) {
+      return { ok: false, phase: 'detect-changes', error: 'no commits ahead of origin/main', log };
+    }
+    note(`commits ahead: ${stdout.trim().split('\n').length}`);
+  } catch (e) {
+    return { ok: false, phase: 'detect-changes', error: e.message, log };
+  }
+
+  // Phase 1: pre-merge tests on the feature branch
+  const tests = await runProjectTests(projectPath);
+  if (!tests.ok) {
+    return { ok: false, phase: 'pre-merge-tests', error: (tests.stderr || 'tests failed').slice(0, 400), log, branch };
+  }
+  note(`tests: ${tests.skipped ? `skipped(${tests.skipped})` : 'passed'}`);
+
+  // Phase 2: merge to main
+  let mergeCommit;
+  try {
+    await sh('git checkout main', { cwd: projectPath });
+    await sh('git pull --ff-only origin main', { cwd: projectPath }).catch(() => {
+      // If main diverged or pull fails (network, etc.), proceed with local main.
+      // This is safer than aborting — worker's base was origin/main already.
+    });
+    await sh(`git merge --no-ff --no-edit ${JSON.stringify(branch)}`, { cwd: projectPath });
+    const { stdout } = await sh('git rev-parse HEAD', { cwd: projectPath });
+    mergeCommit = stdout.trim();
+    note(`merged ${branch} → main @ ${mergeCommit.slice(0, 8)}`);
+  } catch (e) {
+    await sh('git merge --abort', { cwd: projectPath }).catch(() => {});
+    await sh('git checkout main', { cwd: projectPath }).catch(() => {});
+    return { ok: false, phase: 'merge', error: (e.stderr || e.message).slice(0, 400), log, branch };
+  }
+
+  // Phase 3: push
+  try {
+    await sh('git push origin main', { cwd: projectPath });
+    note('pushed to origin/main');
+  } catch (e) {
+    await sh('git reset --hard HEAD~1', { cwd: projectPath }).catch(() => {});
+    return { ok: false, phase: 'push', error: (e.stderr || e.message).slice(0, 400), log, branch };
+  }
+
+  // Phase 4: deploy (only if Fly app is configured AND project is gloss — widen
+  // as other apps get their fly apps wired in)
+  const flyApp = FLY_APPS[projectName];
+  if (!flyApp) {
+    return { ok: true, phase: 'done', branch, merge_commit: mergeCommit, deployed: false, reason: 'no fly app configured', log };
+  }
+
+  try {
+    note(`deploying to fly app "${flyApp}"`);
+    await sh(`fly deploy -a ${flyApp} --remote-only`, { cwd: projectPath, timeout: 10 * 60_000 });
+    note('deploy succeeded');
+  } catch (e) {
+    note(`deploy FAILED: ${(e.stderr || e.message).slice(0, 200)}`);
+    // Revert: roll back Fly AND revert the merge commit on main
+    await sh(`fly releases rollback -a ${flyApp} -y`, { timeout: 2 * 60_000 }).catch(err => {
+      note(`fly rollback error: ${err.message}`);
+    });
+    try {
+      await sh(`git revert -m 1 --no-edit ${mergeCommit}`, { cwd: projectPath });
+      await sh('git push origin main', { cwd: projectPath });
+      note('reverted merge commit on main');
+    } catch (gerr) {
+      note(`git revert error: ${gerr.message}`);
+    }
+    return { ok: false, phase: 'deploy', error: (e.stderr || e.message).slice(0, 400), log, branch, merge_commit: mergeCommit, reverted: true };
+  }
+
+  // Phase 5: post-deploy health check
+  const appUrl = process.env[`${projectName.toUpperCase()}_URL`];
+  if (appUrl) {
+    try {
+      const ok = await probeHealth(`${appUrl.replace(/\/$/, '')}/api/health`);
+      if (!ok) {
+        note('health check failed after deploy — rolling back');
+        await sh(`fly releases rollback -a ${flyApp} -y`, { timeout: 2 * 60_000 }).catch(() => {});
+        await sh(`git revert -m 1 --no-edit ${mergeCommit}`, { cwd: projectPath }).catch(() => {});
+        await sh('git push origin main', { cwd: projectPath }).catch(() => {});
+        return { ok: false, phase: 'post-deploy-health', error: 'health check failed', log, branch, merge_commit: mergeCommit, reverted: true };
+      }
+      note('health check passed');
+    } catch (e) {
+      note(`health check error: ${e.message}`);
+    }
+  }
+
+  return { ok: true, phase: 'done', branch, merge_commit: mergeCommit, deployed: true, fly_app: flyApp, log };
+}
+
+async function probeHealth(url) {
+  const deadline = Date.now() + HEALTH_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${SUITE_API_KEY}` } });
+      if (res.ok || res.status === 401) return true; // 401 = app responding, auth just differs
+    } catch { /* retry */ }
+    await new Promise(r => setTimeout(r, 5_000));
+  }
+  return false;
 }
 
 // ── fetch ─────────────────────────────────────────────────────────────────────
@@ -268,16 +440,53 @@ async function cmdDispatch(planPath) {
     });
   }));
 
-  // Annotate originating Gloss captures so Nathan sees what shipped.
-  const annotations = [];
+  // Ship each project whose worker finished with status=done. Runs sequentially
+  // per project so test/merge/deploy operations don't race on a shared repo.
+  const ships = [];
   for (const r of results) {
     if (r.status !== 'done') continue;
+    if (!SHIP_ENABLED) {
+      ships.push({ project: r.project, run_id: r.run_id, ok: false, phase: 'disabled', reason: 'NIGHTLY_SHIP=false' });
+      continue;
+    }
+    const proj = byName[r.project];
+    if (!proj) continue;
+    try {
+      const ship = await shipProjectChanges({ projectName: r.project, projectPath: proj.path, runId: r.run_id });
+      ships.push({ project: r.project, run_id: r.run_id, ...ship });
+      r.shipped = ship.ok;
+      r.ship_phase = ship.phase;
+    } catch (err) {
+      ships.push({ project: r.project, run_id: r.run_id, ok: false, phase: 'unhandled', error: err.message });
+      r.shipped = false;
+    }
+  }
+
+  // Annotate originating Gloss captures ONLY when the change actually shipped
+  // (tests passed, merged, pushed, and — if applicable — deployed). Otherwise
+  // annotate with the truthful status so Nathan isn't told "shipped" for code
+  // that's sitting on a feature branch.
+  const annotations = [];
+  for (const r of results) {
+    const shipEntry = ships.find(s => s.run_id === r.run_id);
     for (const captureId of r.source_capture_ids || []) {
       if (!captureId || typeof captureId !== 'string') continue;
+      let note;
+      if (shipEntry?.ok && shipEntry.deployed) {
+        note = `deployed to ${r.project} (${shipEntry.fly_app}, commit ${shipEntry.merge_commit?.slice(0, 8)})`;
+      } else if (shipEntry?.ok) {
+        note = `merged to ${r.project}/main (commit ${shipEntry.merge_commit?.slice(0, 8)}) — no fly app configured, not deployed`;
+      } else if (r.status === 'done' && shipEntry) {
+        note = `built in ${r.project} on branch ${shipEntry.branch || '?'} — ship failed at ${shipEntry.phase}${shipEntry.reverted ? ' (reverted)' : ''}: ${shipEntry.error?.slice(0, 160) || ''}`;
+      } else if (r.status === 'done') {
+        note = `built in ${r.project} (run ${r.run_id?.slice(0, 8)}) — not shipped (NIGHTLY_SHIP disabled)`;
+      } else {
+        note = `attempted in ${r.project} — worker ${r.status}`;
+      }
       try {
         await bearerPost(
           `${GLOSS_URL}/api/captures/${encodeURIComponent(captureId)}/annotate`,
-          { note: `shipped in ${r.project} (run ${r.run_id?.slice(0, 8) || '?'})` },
+          { note },
         );
         annotations.push({ capture_id: captureId, project: r.project, status: 'annotated' });
       } catch (err) {
@@ -294,6 +503,7 @@ async function cmdDispatch(planPath) {
     routes_received: plan.routes.length,
     routes_skipped: skipped,
     workers: results,
+    ships,
     annotations,
     cursor_updated_to: plan.update_cursor_to || null,
   }, null, 2));

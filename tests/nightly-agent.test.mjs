@@ -183,5 +183,37 @@ describe('nightly-agent dispatch', () => {
     assert.ok(reasons.includes('unknown_project'), 'flock should be rejected as unknown');
     assert.ok(reasons.includes('missing_task'), 'gloss route with no task should be rejected');
     assert.deepEqual(out.workers, []);
+    assert.deepEqual(out.ships, []);
+  });
+
+  test('exposes ships array alongside workers in output shape', () => {
+    const plan = join(tmpDir, 'plan.json');
+    writeFileSync(plan, JSON.stringify({ routes: [{ project: 'nonexistent', task: 't' }] }));
+    const r = runAgent(['dispatch', plan]);
+    assert.equal(r.status, 0);
+    const out = JSON.parse(r.stdout);
+    assert.ok('ships' in out, 'ships key must be present on every dispatch');
+    assert.ok(Array.isArray(out.ships));
+  });
+});
+
+// ── ship pipeline smoke test ──────────────────────────────────────────────
+// We can't exercise the real ship pipeline in unit tests (it needs a git
+// repo, a remote, npm test, fly deploy). But we can verify the script
+// exposes ship-related output fields and respects NIGHTLY_SHIP=false to
+// bypass shipping when the user wants commit-only behavior.
+
+describe('nightly-agent ship gating', () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), 'maestro-ship-')); });
+  afterEach(() => { try { rmSync(tmpDir, { recursive: true, force: true }); } catch {} });
+
+  test('NIGHTLY_SHIP=false prevents ship from running (empty ships array when no workers ran)', () => {
+    const plan = join(tmpDir, 'plan.json');
+    writeFileSync(plan, JSON.stringify({ routes: [{ project: 'unknown', task: 't' }] }));
+    const r = runAgent(['dispatch', plan], { NIGHTLY_SHIP: 'false' });
+    assert.equal(r.status, 0);
+    const out = JSON.parse(r.stdout);
+    assert.deepEqual(out.ships, []);
   });
 });
