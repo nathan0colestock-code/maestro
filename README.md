@@ -2,7 +2,7 @@
 
 You describe a feature you want built — by voice on your phone or by typing — and Maestro handles the rest overnight. It writes the code, runs the tests, and deploys it to production. In the morning you wake up to either a green "deployed" or a clear explanation of why it stopped.
 
-It orchestrates a five-app personal suite: [gloss](https://github.com/nathan0colestock-code/gloss) · [comms](https://github.com/nathan0colestock-code/comms) · [scribe](https://github.com/nathan0colestock-code/scribe) · [black](https://github.com/nathan0colestock-code/black)
+It orchestrates a five-app personal suite: [gloss](https://github.com/nathan0colestock-code/gloss) · [comms](https://github.com/nathan0colestock-code/comms) · [scribe](https://github.com/nathan0colestock-code/scribe) · [black hole](https://github.com/nathan0colestock-code/black)
 
 ![Maestro PWA — project dashboard showing live worker status and overnight queue](docs/screenshots/dashboard.png)
 
@@ -172,7 +172,7 @@ Maestro is the **orchestration** node of a five-app personal suite. Independent 
 | **[gloss](https://github.com/nathan0colestock-code/gloss)** | Turns paper journal scans into a searchable knowledge graph | Dispatches feature sets; polls `/api/status`; proxies voice via `/api/gloss/voice` |
 | **[comms](https://github.com/nathan0colestock-code/comms)** | Collects iMessages + Gmail into a private local database | Dispatches feature sets; polls `/api/status` |
 | **[scribe](https://github.com/nathan0colestock-code/scribe)** | Collaborative document editor linked to your journal | Dispatches feature sets; polls `/api/status` |
-| **[black](https://github.com/nathan0colestock-code/black)** | Personal search across Drive, Evernote, and iCloud | Dispatches feature sets; polls `/api/status` |
+| **[black hole](https://github.com/nathan0colestock-code/black)** | Personal file search across Drive, Evernote, and iCloud | Dispatches feature sets; polls `/api/status` |
 
 Every app exposes `GET /api/status` → `{ app, version, ok, uptime_seconds, metrics }`, Bearer-authed with the shared `SUITE_API_KEY`.
 
@@ -183,3 +183,11 @@ Every app exposes `GET /api/status` → `{ app, version, ok, uptime_seconds, met
 ## License
 
 Private.
+
+---
+
+## Have Claude help you set this up
+
+Paste this into [Claude](https://claude.ai) to get guided setup assistance:
+
+> I want to set up Maestro from https://github.com/nathan0colestock-code/maestro. It has three parts: a cloud server (deployed to Fly.io), a local daemon that runs on my Mac as a background service, and a web PWA. I need help setting up all three. I'll share my `.env.example` files and any error messages as we go. Start by asking me what I have installed already.
