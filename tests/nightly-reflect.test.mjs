@@ -108,12 +108,12 @@ describe('runNightlyReflection', () => {
     const today = _test.todayISO();
     // Temporarily write a sentinel. Clean up after.
     const lessonsPath = resolve(new URL('../LESSONS.md', import.meta.url).pathname);
-    let prior = '';
+    let prior = null;
     try { prior = await readFile(lessonsPath, 'utf8'); } catch {}
-    const hadSentinel = prior.includes(`\n## ${today}\n`);
+    const hadSentinel = prior != null && prior.includes(`\n## ${today}\n`);
     try {
       if (!hadSentinel) {
-        await writeFile(lessonsPath, `${prior}\n## ${today}\n- [test] temporary sentinel\n`, 'utf8');
+        await writeFile(lessonsPath, `${prior ?? ''}\n## ${today}\n- [test] temporary sentinel\n`, 'utf8');
       }
       let calls = 0;
       const cloudApi = async () => { calls++; return {}; };
@@ -124,8 +124,11 @@ describe('runNightlyReflection', () => {
     } finally {
       // Restore original LESSONS.md so the test is idempotent.
       if (!hadSentinel) {
-        try { await writeFile(lessonsPath, prior, 'utf8'); }
-        catch { await rm(lessonsPath, { force: true }); }
+        if (prior != null) {
+          try { await writeFile(lessonsPath, prior, 'utf8'); } catch {}
+        } else {
+          await rm(lessonsPath, { force: true });
+        }
       }
     }
   });
@@ -133,10 +136,10 @@ describe('runNightlyReflection', () => {
   test('force=true runs even when today is already reflected', async () => {
     const today = _test.todayISO();
     const lessonsPath = resolve(new URL('../LESSONS.md', import.meta.url).pathname);
-    let prior = '';
+    let prior = null;
     try { prior = await readFile(lessonsPath, 'utf8'); } catch {}
     try {
-      await writeFile(lessonsPath, `${prior}\n## ${today}\n- [test] sentinel\n`, 'utf8');
+      await writeFile(lessonsPath, `${prior ?? ''}\n## ${today}\n- [test] sentinel\n`, 'utf8');
       const cloudApi = async (method, path) => {
         if (path.startsWith('/api/reflect/observations')) {
           return {
@@ -159,8 +162,11 @@ describe('runNightlyReflection', () => {
       assert.equal(result.capture_id, 42);
       assert.equal(result.lessons_count, 1);
     } finally {
-      try { await writeFile(lessonsPath, prior, 'utf8'); }
-      catch { await rm(lessonsPath, { force: true }); }
+      if (prior != null) {
+        try { await writeFile(lessonsPath, prior, 'utf8'); } catch {}
+      } else {
+        await rm(lessonsPath, { force: true });
+      }
     }
   });
 });
