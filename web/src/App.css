@@ -10,15 +10,21 @@
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   padding-top: var(--safe-top);
+  order: 0;
 }
 
-/* Mobile bottom tab bar */
+/* Mobile bottom tab bar — rendered after content via flex order so the
+   nav sits at the bottom of the viewport (reachable by thumb). */
 .tab-bar {
   display: flex;
   border-top: 1px solid var(--border);
   background: var(--surface);
   padding-bottom: var(--safe-bottom);
   flex-shrink: 0;
+  order: 1;
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
 }
 
 /* Sidebar-only elements: hidden on mobile */
@@ -70,7 +76,7 @@
     padding-top: 0;
   }
 
-  /* Sidebar */
+  /* Sidebar — reset mobile's order so nav sits on the LEFT of content */
   .tab-bar {
     flex-direction: column;
     align-items: stretch;
@@ -83,7 +89,9 @@
     height: 100vh;
     position: sticky;
     top: 0;
+    bottom: auto;
     overflow-y: auto;
+    order: -1;
   }
 
   .sidebar-brand {

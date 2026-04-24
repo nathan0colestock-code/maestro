@@ -1,14 +1,14 @@
 .capture-screen {
-  padding: 24px 16px 16px;
+  padding: 12px 16px 16px;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 14px;
   min-height: 100%;
 }
 
-.capture-header { text-align: center; }
-.capture-title { font-size: 28px; font-weight: 700; letter-spacing: -0.5px; color: var(--accent); }
-.capture-subtitle { font-size: 14px; color: var(--text-muted); margin-top: 4px; }
+.capture-header { text-align: left; }
+.capture-title { font-size: 20px; font-weight: 700; letter-spacing: -0.3px; color: var(--accent); }
+.capture-subtitle { font-size: 13px; color: var(--text-muted); margin-top: 2px; }
 
 .input-area {
   display: flex;
@@ -206,9 +206,12 @@
     max-width: 720px;
     margin: 0 auto;
     padding: 40px 32px 32px;
+    gap: 24px;
   }
 
   .capture-header { text-align: left; }
+  .capture-title { font-size: 28px; letter-spacing: -0.5px; }
+  .capture-subtitle { font-size: 14px; margin-top: 4px; }
 
   .capture-textarea { min-height: 160px; }
 
