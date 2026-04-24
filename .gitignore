@@ -4,3 +4,5 @@ node_modules/
 cloud/public/
 dist/
 .DS_Store
+.claude/
+reports/
