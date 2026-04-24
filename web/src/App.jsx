@@ -3,7 +3,6 @@ import Capture from './Capture.jsx';
 import Dashboard from './Dashboard.jsx';
 import Answer from './Answer.jsx';
 import Features from './Features.jsx';
-import Recommend from './Recommend.jsx';
 import Define from './Define.jsx';
 import Insights from './Insights.jsx';
 import Login from './Login.jsx';
@@ -42,9 +41,8 @@ export default function App() {
       else if (e.key === '2') setTab('features');
       else if (e.key === '3') setTab('answer');
       else if (e.key === '4') setTab('dashboard');
-      else if (e.key === '5') setTab('recommend');
-      else if (e.key === '6') setTab('define');
-      else if (e.key === '7') setTab('insights');
+      else if (e.key === '5') setTab('define');
+      else if (e.key === '6') setTab('insights');
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -69,9 +67,8 @@ export default function App() {
       badge: pendingQuestions > 0,
     },
     { id: 'dashboard', icon: '⊞', label: 'Projects', shortcut: '4' },
-    { id: 'recommend', icon: '💡', label: 'Ideas',    shortcut: '5' },
-    { id: 'define',    icon: '◇', label: 'Define',   shortcut: '6' },
-    { id: 'insights',  icon: '◆', label: 'Insights', shortcut: '7' },
+    { id: 'define',    icon: '◇', label: 'Define',   shortcut: '5' },
+    { id: 'insights',  icon: '◆', label: 'Insights', shortcut: '6' },
   ];
 
   return (
@@ -107,7 +104,6 @@ export default function App() {
         {tab === 'features'  && <Features />}
         {tab === 'dashboard' && <Dashboard onLogout={logout} />}
         {tab === 'answer'    && <Answer />}
-        {tab === 'recommend' && <Recommend />}
         {tab === 'define'    && <Define />}
         {tab === 'insights'  && <Insights />}
       </main>
