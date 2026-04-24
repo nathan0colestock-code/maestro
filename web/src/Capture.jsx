@@ -32,6 +32,8 @@ export default function Capture() {
   const [status, setStatus] = useState(null); // null | 'sending' | 'sent' | 'error'
   const [recent, setRecent] = useState([]);
   const [recentLoaded, setRecentLoaded] = useState(false);
+  const [mode, setMode] = useState('queue'); // 'queue' | 'notebook'
+  const [glossResult, setGlossResult] = useState(null); // { review_url, date } after notebook send
   const recognitionRef = useRef(null);
   const textareaRef = useRef(null);
 
@@ -83,7 +85,7 @@ export default function Capture() {
     setListening(false);
   }
 
-  async function send() {
+  async function sendToQueue() {
     const trimmed = text.trim();
     if (!trimmed) return;
 
@@ -104,9 +106,42 @@ export default function Capture() {
     }
   }
 
+  async function sendToGloss() {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    setStatus('sending');
+    setGlossResult(null);
+    try {
+      const res = await apiFetch('/api/gloss/voice', {
+        method: 'POST',
+        body: JSON.stringify({ transcript: trimmed }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const body = await res.json();
+      setText('');
+      setStatus('sent');
+      setGlossResult({ review_url: body.review_url, date: body.date });
+      setTimeout(() => setStatus(null), 4000);
+    } catch {
+      setStatus('error');
+      setTimeout(() => setStatus(null), 3000);
+    }
+  }
+
+  function send() {
+    if (mode === 'notebook') return sendToGloss();
+    return sendToQueue();
+  }
+
   function handleKeyDown(e) {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send();
   }
+
+  const isNotebook = mode === 'notebook';
+  const sendLabel = isNotebook
+    ? (status === 'sending' ? 'Sending…' : status === 'sent' ? 'Saved ✓' : status === 'error' ? 'Error ✗' : 'Save to Gloss')
+    : (status === 'sending' ? 'Sending…' : status === 'sent' ? 'Sent ✓' : status === 'error' ? 'Error ✗' : 'Send');
 
   return (
     <div className="capture-screen">
@@ -115,6 +150,21 @@ export default function Capture() {
         <p className="capture-subtitle">What's on your mind?</p>
       </header>
 
+      <div className="mode-toggle">
+        <button
+          className={`mode-btn ${mode === 'queue' ? 'active' : ''}`}
+          onClick={() => setMode('queue')}
+        >
+          Task Queue
+        </button>
+        <button
+          className={`mode-btn ${mode === 'notebook' ? 'active' : ''}`}
+          onClick={() => setMode('notebook')}
+        >
+          📓 Notebook
+        </button>
+      </div>
+
       <div className="input-area">
         <textarea
           ref={textareaRef}
@@ -122,7 +172,7 @@ export default function Capture() {
           value={text}
           onChange={e => setText(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Toss in a note, idea, or task…"
+          placeholder={isNotebook ? 'Speak or type a notebook capture…' : 'Toss in a note, idea, or task…'}
           rows={5}
           autoFocus
         />
@@ -137,20 +187,37 @@ export default function Capture() {
           </button>
 
           <button
-            className={`send-btn ${status}`}
+            className={`send-btn ${status} ${isNotebook ? 'notebook-send' : ''}`}
             onClick={send}
             disabled={!text.trim() || status === 'sending'}
           >
-            {status === 'sending' ? 'Sending…' : status === 'sent' ? 'Sent ✓' : status === 'error' ? 'Error ✗' : 'Send'}
+            {sendLabel}
           </button>
         </div>
 
         {listening && (
           <p className="listening-hint">Listening… tap ⬛ to stop</p>
         )}
+
+        {isNotebook && status === 'sent' && glossResult?.review_url && (
+          <div className="gloss-success">
+            <a
+              href={glossResult.review_url}
+              target="_blank"
+              rel="noreferrer"
+              className="gloss-review-link"
+            >
+              View in Gloss →
+            </a>
+          </div>
+        )}
+
+        {isNotebook && (
+          <p className="mode-hint">Voice memos go straight into your Gloss notebook.</p>
+        )}
       </div>
 
-      {recentLoaded && recent.length > 0 && (
+      {!isNotebook && recentLoaded && recent.length > 0 && (
         <section className="recent-section">
           <h2 className="section-heading">Recent</h2>
           <ul className="recent-list">

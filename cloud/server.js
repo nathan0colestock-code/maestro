@@ -966,6 +966,62 @@ function safeParseJson(s) {
   try { return JSON.parse(s); } catch { return s; }
 }
 
+// POST /api/gloss/voice — proxy a voice transcript directly to Gloss's ingest
+// pipeline. Records a captures row (source='voice_gloss') for traceability,
+// then forwards to Gloss POST /api/ingest/voice and returns the result plus an
+// absolute review_url pointing at the Gloss daily log.
+//
+// Requires GLOSS_URL + GLOSS_API_KEY set in Fly secrets (same pattern scribe uses).
+// Returns 503 if the env vars are absent so callers can degrade gracefully.
+app.post('/api/gloss/voice', auth, async (req, res) => {
+  const { transcript, date } = req.body || {};
+  if (!transcript?.trim()) return res.status(400).json({ error: 'transcript required' });
+
+  const GLOSS_URL = process.env.GLOSS_URL;
+  const GLOSS_API_KEY = process.env.GLOSS_API_KEY;
+  if (!GLOSS_URL || !GLOSS_API_KEY) {
+    return res.status(503).json({ error: 'GLOSS_URL/GLOSS_API_KEY not configured' });
+  }
+
+  // Store a capture row so the Maestro dashboard shows voice-gloss entries.
+  const captureRow = db.prepare(
+    `INSERT INTO captures (text, source, processed_at) VALUES (?, 'voice_gloss', datetime('now')) RETURNING *`
+  ).get(transcript.trim());
+
+  try {
+    const body = { transcript: transcript.trim() };
+    if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) body.date = date;
+
+    const glossRes = await fetch(`${GLOSS_URL}/api/ingest/voice`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${GLOSS_API_KEY}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(60_000),
+    });
+
+    const glossBody = await glossRes.json().catch(() => ({}));
+    if (!glossRes.ok) {
+      return res.status(502).json({
+        error: 'Gloss ingest failed',
+        status: glossRes.status,
+        detail: glossBody?.error || glossBody?.detail || '',
+      });
+    }
+
+    // Build absolute review_url from the relative path Gloss returns.
+    const reviewUrl = glossBody.review_url
+      ? `${GLOSS_URL.replace(/\/$/, '')}${glossBody.review_url}`
+      : `${GLOSS_URL.replace(/\/$/, '')}/daily/${glossBody.date || date || new Date().toISOString().slice(0, 10)}`;
+
+    return res.json({ ...glossBody, review_url: reviewUrl, capture_id: captureRow.id });
+  } catch (err) {
+    return res.status(502).json({ error: 'Gloss unreachable', detail: err.message });
+  }
+});
+
 // Serve PWA for all non-API routes (SPA fallback)
 app.get('*', (req, res) => {
   res.sendFile(join(__dirname, 'public', 'index.html'));

@@ -141,3 +141,61 @@
 
 .routing-project { color: var(--accent); font-weight: 600; }
 .routing-action { color: var(--text-muted); }
+
+/* Mode toggle: Task Queue vs Notebook */
+.mode-toggle {
+  display: flex;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px;
+}
+
+.mode-btn {
+  flex: 1;
+  height: 36px;
+  border-radius: calc(var(--radius) - 2px);
+  font-size: 14px;
+  font-weight: 500;
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  transition: background 0.15s, color 0.15s;
+}
+
+.mode-btn.active {
+  background: var(--surface2);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.notebook-send {
+  background: #6366f1;
+}
+
+.notebook-send.sent {
+  background: var(--active);
+}
+
+.mode-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.gloss-success {
+  text-align: center;
+  animation: fade-in 0.2s;
+}
+
+.gloss-review-link {
+  display: inline-block;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+  padding: 8px 16px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+}
