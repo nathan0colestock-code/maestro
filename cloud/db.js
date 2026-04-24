@@ -196,6 +196,73 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_feature_recs_status ON feature_recommendations(status);
   CREATE INDEX IF NOT EXISTS idx_feature_recs_target ON feature_recommendations(target_app);
+
+  -- SPEC 7: Feature Definition Phase. One row per clarifying round-trip
+  -- before a feature set can be dispatched. Daemon refuses to dispatch
+  -- unless an approved thread exists for the feature.
+  CREATE TABLE IF NOT EXISTS definition_threads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    feature_title TEXT NOT NULL,
+    capture_id INTEGER REFERENCES captures(id),
+    affected_apps TEXT,           -- JSON array
+    status TEXT NOT NULL DEFAULT 'open',  -- open | answered | approved | rejected
+    questions TEXT,               -- JSON array of strings
+    answers TEXT,                 -- JSON (object/array — UI choice)
+    generated_spec TEXT,          -- markdown
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    approved_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_def_threads_status ON definition_threads(status);
+  CREATE INDEX IF NOT EXISTS idx_def_threads_title ON definition_threads(feature_title);
+
+  -- SPEC 6: push notification subscriptions (web-push).
+  CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    endpoint TEXT NOT NULL UNIQUE,
+    keys TEXT,                    -- JSON: {p256dh, auth}
+    user_agent TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  -- Suite log collector storage. INSERT OR IGNORE dedup by the composite
+  -- UNIQUE key; the ctx column participates so two events with identical
+  -- ts+event but different payloads still land.
+  CREATE TABLE IF NOT EXISTS suite_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    app TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    level TEXT,
+    event TEXT NOT NULL,
+    trace_id TEXT,
+    request_id TEXT,
+    duration_ms INTEGER,
+    ctx TEXT,
+    pulled_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(app, ts, event, ctx)
+  );
+  CREATE INDEX IF NOT EXISTS idx_suite_logs_app_ts ON suite_logs(app, ts);
+  CREATE INDEX IF NOT EXISTS idx_suite_logs_level ON suite_logs(level);
+
+  CREATE TABLE IF NOT EXISTS log_pull_cursor (
+    app TEXT PRIMARY KEY,
+    last_pulled_ts TEXT
+  );
+
+  -- Nightly self-reflection output. One row per date; overwrite-on-conflict
+  -- so re-running the reflector replaces the row rather than stacking.
+  CREATE TABLE IF NOT EXISTS reflection_summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL UNIQUE,
+    summary TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS self_improvement_budget (
+    date TEXT PRIMARY KEY,
+    prs_opened INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0
+  );
 `);
 
 export default db;
