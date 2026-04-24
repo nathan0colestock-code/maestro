@@ -206,3 +206,21 @@
   color: var(--text-muted);
   line-height: 1.5;
 }
+
+/* ── Desktop layout (≥900px) ─────────────────────────────── */
+@media (min-width: 900px) {
+  .dashboard-screen {
+    padding: 32px 40px;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  .project-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 12px;
+  }
+
+  /* Logout lives in the sidebar on desktop */
+  .mobile-logout { display: none; }
+}

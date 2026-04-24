@@ -199,3 +199,22 @@
   border: 1px solid var(--accent);
   border-radius: 8px;
 }
+
+/* ── Desktop layout (≥900px) ─────────────────────────────── */
+@media (min-width: 900px) {
+  .capture-screen {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 40px 32px 32px;
+  }
+
+  .capture-header { text-align: left; }
+
+  .capture-textarea { min-height: 160px; }
+
+  .recent-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 8px;
+  }
+}
