@@ -6,11 +6,9 @@ import { execSync } from 'child_process';
 // PROJECT_PATHS map from this list so there's no drift when a new project
 // is added.
 export const PROJECTS = [
-  { name: 'flock', path: '/Users/nathancolestock/flock' },
   { name: 'gloss', path: '/Users/nathancolestock/gloss' },
   { name: 'tend', path: '/Users/nathancolestock/tend' },
   { name: 'comms', path: '/Users/nathancolestock/comms' },
-  { name: 'maestro', path: '/Users/nathancolestock/maestro' },
   { name: 'scribe', path: '/Users/nathancolestock/scribe' },
   { name: 'black', path: '/Users/nathancolestock/black' },
 ];

@@ -58,7 +58,7 @@ async function healthCheck(flyApp) {
 async function flyRollback(flyApp) {
   try {
     const { stdout } = await exec(
-      `fly releases rollback -a ${flyApp} --yes`,
+      `fly releases rollback -a ${flyApp} -y`,
       { timeout: FLY_ROLLBACK_TIMEOUT_MS }
     );
     return { ok: true, stdout };
