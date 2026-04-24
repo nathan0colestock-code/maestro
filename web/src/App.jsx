@@ -4,6 +4,8 @@ import Dashboard from './Dashboard.jsx';
 import Answer from './Answer.jsx';
 import Features from './Features.jsx';
 import Recommend from './Recommend.jsx';
+import Define from './Define.jsx';
+import Insights from './Insights.jsx';
 import Login from './Login.jsx';
 import { getPassword, clearPassword, apiFetch } from './auth.js';
 import './App.css';
@@ -41,6 +43,8 @@ export default function App() {
       else if (e.key === '3') setTab('answer');
       else if (e.key === '4') setTab('dashboard');
       else if (e.key === '5') setTab('recommend');
+      else if (e.key === '6') setTab('define');
+      else if (e.key === '7') setTab('insights');
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -66,6 +70,8 @@ export default function App() {
     },
     { id: 'dashboard', icon: '⊞', label: 'Projects', shortcut: '4' },
     { id: 'recommend', icon: '💡', label: 'Ideas',    shortcut: '5' },
+    { id: 'define',    icon: '◇', label: 'Define',   shortcut: '6' },
+    { id: 'insights',  icon: '◆', label: 'Insights', shortcut: '7' },
   ];
 
   return (
@@ -102,6 +108,8 @@ export default function App() {
         {tab === 'dashboard' && <Dashboard onLogout={logout} />}
         {tab === 'answer'    && <Answer />}
         {tab === 'recommend' && <Recommend />}
+        {tab === 'define'    && <Define />}
+        {tab === 'insights'  && <Insights />}
       </main>
     </div>
   );

@@ -117,6 +117,7 @@ ${projectLines}
 
 Respond ONLY with valid JSON matching this schema:
 {
+  "confidence": <float between 0 and 1 — your overall confidence that this routing is correct>,
   "captures_decomposed": [
     {
       "project": "<primary project name>",

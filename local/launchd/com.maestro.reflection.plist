@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Maestro self-reflection — fires at 23:30 local (after improvement at 23:00).
+  Uses `claude -p` which relies on local macOS Claude auth, so no API key.
+  Writes reflection_summaries via POST /api/self-improvement.
+
+  Install (orchestrator does this — do NOT install manually):
+    cp local/launchd/com.maestro.reflection.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.maestro.reflection.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.maestro.reflection</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/nathancolestock/maestro/local/launchd/run-reflection.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/nathancolestock/maestro</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>23</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/nathancolestock/Library/Logs/suite/maestro-reflection.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/nathancolestock/Library/Logs/suite/maestro-reflection.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>CLAUDE_MODEL</key>
+    <string>claude-sonnet-4-5</string>
+  </dict>
+</dict>
+</plist>

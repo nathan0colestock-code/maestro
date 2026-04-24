@@ -6,6 +6,7 @@ import { timingSafeEqual, createHash } from 'crypto';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import db from './db.js';
+import { log, getRecent as getRecentLogs, httpLogger } from './log.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -34,6 +35,8 @@ app.use(helmet({
   contentSecurityPolicy: false, // PWA uses inline bootstrap; revisit separately
 }));
 app.use(express.json({ limit: '1mb' }));
+// Structured request logging before express.static so static hits are logged.
+app.use(httpLogger());
 app.use(express.static(join(__dirname, 'public')));
 
 // Pre-auth brute-force protection. Login and capture are the two endpoints
@@ -195,10 +198,19 @@ app.get('/api/status', auth, (req, res) => {
 
 // POST /api/queue/:id/ack — daemon marks a capture processed
 app.post('/api/queue/:id/ack', auth, (req, res) => {
-  const { routing_json } = req.body;
+  const { routing_json, router_confidence } = req.body;
+  // M-I-02: persist router_confidence (column added in db.js migrations)
+  // so the nightly analyst can rank captures by model confidence.
+  const conf = typeof router_confidence === 'number'
+    ? Math.max(0, Math.min(1, router_confidence))
+    : null;
   db.prepare(
-    `UPDATE captures SET processed_at = datetime('now'), routing_json = ? WHERE id = ?`
-  ).run(routing_json ? JSON.stringify(routing_json) : null, req.params.id);
+    `UPDATE captures
+       SET processed_at = datetime('now'),
+           routing_json = ?,
+           router_confidence = COALESCE(?, router_confidence)
+     WHERE id = ?`
+  ).run(routing_json ? JSON.stringify(routing_json) : null, conf, req.params.id);
   res.json({ ok: true });
 });
 
@@ -1049,113 +1061,244 @@ app.post('/api/worker/stop-hook', auth, (req, res) => {
   res.json({ ok: true, matched: 1, run_id: row.run_id });
 });
 
-// ── Self-improvement loop endpoints ───────────────────────────────────────
-// Power the nightly analyst (local/improvement-agent.js) and the PWA's
-// "Suggest improvement" surface. See plan: elegant-napping-fox.md.
+// GET /api/logs/recent — bearer-gated. Returns Maestro's own ring-buffer
+// entries for the suite log-collector to harvest. Filters by ISO `since`
+// and minimum `level` (debug < info < warn < error).
+app.get('/api/logs/recent', auth, (req, res) => {
+  const { since, level, limit } = req.query;
+  const entries = getRecentLogs({
+    since: since ? String(since) : undefined,
+    level: level ? String(level) : undefined,
+    limit: limit ? Number(limit) : 200,
+  });
+  res.json({ app: 'maestro', entries });
+});
 
-// GET /api/recommendations?status=new,clustered&target=maestro
-app.get('/api/recommendations', auth, (req, res) => {
-  const { status, target } = req.query;
-  const where = [];
-  const params = [];
-  if (status) {
-    const list = String(status).split(',').map(s => s.trim()).filter(Boolean);
-    if (list.length) { where.push(`status IN (${list.map(() => '?').join(',')})`); params.push(...list); }
+// ── SPEC 7 — Feature Definition threads ────────────────────────────────────
+//
+// A capture destined for cross-app work first passes through a definition
+// thread: the definition-agent asks ≤5 clarifying questions, the user
+// answers on the PWA, then the thread is approved → a spec is generated.
+// The daemon refuses to dispatch a feature set until an approved thread
+// exists (see local/daemon.js gate).
+app.post('/api/definition-threads', auth, (req, res) => {
+  const { feature_title, questions, capture_id, affected_apps } = req.body || {};
+  if (!feature_title?.trim()) return res.status(400).json({ error: 'feature_title required' });
+  const qJson = Array.isArray(questions) ? JSON.stringify(questions)
+    : (typeof questions === 'string' ? questions : null);
+  const appsJson = Array.isArray(affected_apps) ? JSON.stringify(affected_apps) : null;
+  const row = db.prepare(`
+    INSERT INTO definition_threads (feature_title, questions, capture_id, affected_apps, status)
+    VALUES (?, ?, ?, ?, 'open') RETURNING *
+  `).get(feature_title.trim(), qJson, capture_id || null, appsJson);
+  log('info', 'definition_thread_created', { id: row.id, feature_title, trace_id: req.trace_id });
+  res.json(hydrateThread(row));
+});
+
+app.get('/api/definition-threads', auth, (req, res) => {
+  const { status } = req.query;
+  const sql = status
+    ? `SELECT * FROM definition_threads WHERE status = ? ORDER BY created_at DESC LIMIT 100`
+    : `SELECT * FROM definition_threads ORDER BY created_at DESC LIMIT 100`;
+  const rows = status
+    ? db.prepare(sql).all(String(status))
+    : db.prepare(sql).all();
+  res.json(rows.map(hydrateThread));
+});
+
+app.get('/api/definition-threads/:id(\\d+)', auth, (req, res) => {
+  const row = db.prepare(`SELECT * FROM definition_threads WHERE id = ?`).get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  res.json(hydrateThread(row));
+});
+
+// POST /api/definition-threads/:id/answer — user submits answers (object or array).
+app.post('/api/definition-threads/:id(\\d+)/answer', auth, (req, res) => {
+  const { answers } = req.body || {};
+  if (answers == null) return res.status(400).json({ error: 'answers required' });
+  const aJson = typeof answers === 'string' ? answers : JSON.stringify(answers);
+  const row = db.prepare(`
+    UPDATE definition_threads
+       SET answers = ?, status = CASE WHEN status = 'open' THEN 'answered' ELSE status END,
+           updated_at = datetime('now')
+     WHERE id = ? RETURNING *
+  `).get(aJson, req.params.id);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  res.json(hydrateThread(row));
+});
+
+// POST /api/definition-threads/:id/approve — marks the thread approved and
+// stores the generated spec. The definition-agent (local/definition-agent.js)
+// posts the spec text here; this endpoint just persists it.
+app.post('/api/definition-threads/:id(\\d+)/approve', auth, (req, res) => {
+  const { generated_spec } = req.body || {};
+  if (!generated_spec?.trim()) return res.status(400).json({ error: 'generated_spec required' });
+  const row = db.prepare(`
+    UPDATE definition_threads
+       SET generated_spec = ?, status = 'approved',
+           approved_at = datetime('now'), updated_at = datetime('now')
+     WHERE id = ? RETURNING *
+  `).get(generated_spec, req.params.id);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  log('info', 'definition_thread_approved', { id: row.id, trace_id: req.trace_id });
+  res.json(hydrateThread(row));
+});
+
+function hydrateThread(t) {
+  if (!t) return t;
+  const parse = s => { if (s == null) return null; try { return JSON.parse(s); } catch { return s; } };
+  return { ...t, questions: parse(t.questions), answers: parse(t.answers), affected_apps: parse(t.affected_apps) };
+}
+
+// ── SPEC 6 — Push notifications ────────────────────────────────────────────
+//
+// Subscriptions are stored server-side; local/notifier.js pulls them and
+// dispatches web-push messages on state transitions. VAPID public key is
+// served unauthenticated so the SW can subscribe before the user logs in.
+app.get('/api/push/vapid-public', (req, res) => {
+  const pub = process.env.VAPID_PUBLIC_KEY || '';
+  res.json({ public_key: pub, enabled: Boolean(pub) });
+});
+
+app.post('/api/push/subscribe', auth, (req, res) => {
+  const { endpoint, keys, user_agent } = req.body || {};
+  if (!endpoint?.trim()) return res.status(400).json({ error: 'endpoint required' });
+  const keysJson = keys ? (typeof keys === 'string' ? keys : JSON.stringify(keys)) : null;
+  // Upsert on endpoint so re-subscribes don't create duplicates.
+  const row = db.prepare(`
+    INSERT INTO push_subscriptions (endpoint, keys, user_agent)
+    VALUES (?, ?, ?)
+    ON CONFLICT(endpoint) DO UPDATE SET keys = excluded.keys, user_agent = excluded.user_agent
+    RETURNING *
+  `).get(endpoint.trim(), keysJson, user_agent || null);
+  log('info', 'push_subscribe', { id: row.id, trace_id: req.trace_id });
+  res.json(row);
+});
+
+app.delete('/api/push/subscribe/:id(\\d+)', auth, (req, res) => {
+  db.prepare(`DELETE FROM push_subscriptions WHERE id = ?`).run(req.params.id);
+  res.json({ ok: true });
+});
+
+// Used by local/notifier.js to fan out.
+app.get('/api/push/subscriptions', auth, (req, res) => {
+  const rows = db.prepare(`SELECT * FROM push_subscriptions`).all();
+  res.json(rows.map(r => ({
+    ...r,
+    keys: r.keys ? (() => { try { return JSON.parse(r.keys); } catch { return null; } })() : null,
+  })));
+});
+
+// ── Suite logs (collector sink) ────────────────────────────────────────────
+// local/log-collector.js hits /api/suite-logs/ingest with batches of entries
+// pulled from each app's /api/logs/recent. We INSERT OR IGNORE on a unique
+// composite key so overlapping pulls don't create dup rows.
+app.post('/api/suite-logs/ingest', auth, (req, res) => {
+  const { app: appName, entries } = req.body || {};
+  if (!appName || !Array.isArray(entries)) {
+    return res.status(400).json({ error: 'app and entries[] required' });
   }
-  if (target) { where.push('target_app = ?'); params.push(String(target)); }
-  const sql = `SELECT * FROM feature_recommendations
+  const ins = db.prepare(`
+    INSERT OR IGNORE INTO suite_logs (app, ts, level, event, trace_id, request_id, duration_ms, ctx, pulled_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+  `);
+  let inserted = 0, maxTs = null;
+  const tx = db.transaction(rows => {
+    for (const e of rows) {
+      if (!e || !e.ts || !e.event) continue;
+      const ctxStr = e.ctx == null ? null : (typeof e.ctx === 'string' ? e.ctx : JSON.stringify(e.ctx));
+      const r = ins.run(
+        String(appName), String(e.ts), e.level || 'info', String(e.event),
+        e.trace_id || null, e.request_id || null,
+        typeof e.duration_ms === 'number' ? e.duration_ms : null,
+        ctxStr,
+      );
+      if (r.changes) inserted++;
+      if (!maxTs || e.ts > maxTs) maxTs = e.ts;
+    }
+  });
+  tx(entries);
+  if (maxTs) {
+    db.prepare(`
+      INSERT INTO log_pull_cursor (app, last_pulled_ts) VALUES (?, ?)
+      ON CONFLICT(app) DO UPDATE SET last_pulled_ts = excluded.last_pulled_ts
+    `).run(String(appName), String(maxTs));
+  }
+  res.json({ ok: true, inserted, cursor: maxTs });
+});
+
+app.get('/api/suite-logs', auth, (req, res) => {
+  const { app: appName, since, level } = req.query;
+  const where = [], params = [];
+  if (appName) { where.push('app = ?'); params.push(String(appName)); }
+  if (since) { where.push('ts >= ?'); params.push(String(since)); }
+  if (level) {
+    const MIN = { debug: 1, info: 2, warn: 3, error: 4 }[String(level)] || 0;
+    if (MIN) {
+      const allowed = Object.entries({ debug: 1, info: 2, warn: 3, error: 4 })
+        .filter(([, v]) => v >= MIN).map(([k]) => k);
+      where.push(`level IN (${allowed.map(() => '?').join(',')})`);
+      params.push(...allowed);
+    }
+  }
+  const sql = `SELECT * FROM suite_logs
                ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-               ORDER BY created_at DESC LIMIT 200`;
-  res.json(db.prepare(sql).all(...params));
+               ORDER BY ts DESC LIMIT 1000`;
+  const rows = db.prepare(sql).all(...params);
+  res.json(rows.map(r => ({
+    ...r,
+    ctx: r.ctx ? (() => { try { return JSON.parse(r.ctx); } catch { return r.ctx; } })() : null,
+  })));
 });
 
-// POST /api/recommendations — user submits a feature suggestion.
-app.post('/api/recommendations', auth, (req, res) => {
-  const { text, source = 'pwa_text', target_app = null, priority = 3 } = req.body || {};
-  if (!text || typeof text !== 'string' || !text.trim()) {
-    return res.status(400).json({ error: 'text required' });
-  }
-  const info = db.prepare(`
-    INSERT INTO feature_recommendations (source, target_app, text, priority)
-    VALUES (?, ?, ?, ?)
-  `).run(String(source), target_app ? String(target_app) : null, text.trim(), Number(priority) || 3);
-  res.json({ ok: true, id: info.lastInsertRowid });
+app.get('/api/suite-logs/cursor', auth, (req, res) => {
+  const rows = db.prepare(`SELECT app, last_pulled_ts FROM log_pull_cursor`).all();
+  res.json(rows);
 });
 
-// POST /api/recommendations/:id — update (user reprioritize, analyst cluster).
-app.post('/api/recommendations/:id(\\d+)', auth, (req, res) => {
-  const id = Number(req.params.id);
-  const { priority, status, theme, reject_reason, linked_pr_url } = req.body || {};
-  const updates = [];
-  const params = [];
-  if (priority != null)      { updates.push('priority = ?');      params.push(Number(priority)); }
-  if (status != null)        { updates.push('status = ?');        params.push(String(status)); }
-  if (theme != null)         { updates.push('theme = ?');         params.push(String(theme)); }
-  if (reject_reason != null) { updates.push('reject_reason = ?'); params.push(String(reject_reason)); }
-  if (linked_pr_url != null) { updates.push('linked_pr_url = ?'); params.push(String(linked_pr_url)); }
-  if (status === 'shipped' || status === 'rejected') {
-    updates.push("resolved_at = datetime('now')");
-  }
-  if (!updates.length) return res.status(400).json({ error: 'no fields to update' });
-  params.push(id);
-  db.prepare(`UPDATE feature_recommendations SET ${updates.join(', ')} WHERE id = ?`).run(...params);
-  res.json({ ok: true });
-});
-
-// POST /api/routing-feedback — user reports a misroute.
-app.post('/api/routing-feedback', auth, (req, res) => {
-  const { capture_id, action, detail } = req.body || {};
-  if (!action) return res.status(400).json({ error: 'action required' });
-  const info = db.prepare(`
-    INSERT INTO routing_feedback (capture_id, action, detail) VALUES (?, ?, ?)
-  `).run(capture_id ? Number(capture_id) : null, String(action),
-         detail == null ? null : (typeof detail === 'string' ? detail : JSON.stringify(detail)));
-  res.json({ ok: true, id: info.lastInsertRowid });
-});
-
-// POST /api/suite-telemetry — daemon pushes nightly payloads per app.
-app.post('/api/suite-telemetry', auth, (req, res) => {
-  const { app: appName, date, payload } = req.body || {};
-  if (!appName || !date || payload == null) return res.status(400).json({ error: 'app, date, payload required' });
-  const json = typeof payload === 'string' ? payload : JSON.stringify(payload);
+// ── Self-improvement (reflection) ──────────────────────────────────────────
+// Written by local/reflection-agent.js after the nightly build loop.
+app.post('/api/self-improvement', auth, (req, res) => {
+  const { date, summary } = req.body || {};
+  if (!date || summary == null) return res.status(400).json({ error: 'date and summary required' });
+  const sum = typeof summary === 'string' ? summary : JSON.stringify(summary);
   db.prepare(`
-    INSERT INTO suite_telemetry (app, date, payload) VALUES (?, ?, ?)
-    ON CONFLICT(app, date) DO UPDATE SET payload = excluded.payload
-  `).run(String(appName), String(date), json);
+    INSERT INTO reflection_summaries (date, summary) VALUES (?, ?)
+    ON CONFLICT(date) DO UPDATE SET summary = excluded.summary
+  `).run(String(date), sum);
   res.json({ ok: true });
 });
 
-app.get('/api/suite-telemetry', auth, (req, res) => {
-  const days = Math.max(1, Math.min(90, Number(req.query.days) || 7));
-  const rows = db.prepare(`
-    SELECT app, date, payload, created_at FROM suite_telemetry
-    WHERE date(date) >= date('now', ?)
-    ORDER BY date DESC, app ASC
-  `).all(`-${days} day`);
-  res.json(rows.map(r => ({ ...r, payload: safeParseJson(r.payload) })));
-});
-
-app.post('/api/nightly-summary', auth, (req, res) => {
-  const { date, summary, suggestions } = req.body || {};
-  if (!date) return res.status(400).json({ error: 'date required' });
-  const sumJson = summary == null ? null : (typeof summary === 'string' ? summary : JSON.stringify(summary));
-  const sugJson = suggestions == null ? null : (typeof suggestions === 'string' ? suggestions : JSON.stringify(suggestions));
-  db.prepare(`
-    INSERT INTO telemetry_summary (date, summary, suggestions) VALUES (?, ?, ?)
-    ON CONFLICT(date) DO UPDATE SET summary = excluded.summary, suggestions = excluded.suggestions
-  `).run(String(date), sumJson, sugJson);
-  res.json({ ok: true });
-});
-
-app.get('/api/nightly-summary/latest', auth, (req, res) => {
-  const row = db.prepare(`SELECT date, summary, suggestions, created_at FROM telemetry_summary ORDER BY date DESC LIMIT 1`).get();
+app.get('/api/self-improvement/latest', auth, (req, res) => {
+  const row = db.prepare(`SELECT date, summary, created_at FROM reflection_summaries ORDER BY date DESC LIMIT 1`).get();
   if (!row) return res.json(null);
   res.json({
     date: row.date,
     summary: safeParseJson(row.summary),
-    suggestions: safeParseJson(row.suggestions),
     created_at: row.created_at,
   });
+});
+
+// Self-improvement budget helpers (consumed by local/auto-pr.js).
+app.get('/api/self-improvement/budget', auth, (req, res) => {
+  const date = String(req.query.date || new Date().toISOString().slice(0, 10));
+  const row = db.prepare(`SELECT * FROM self_improvement_budget WHERE date = ?`).get(date);
+  res.json(row || { date, prs_opened: 0, cost_usd: 0 });
+});
+
+app.post('/api/self-improvement/budget', auth, (req, res) => {
+  const { date, prs_opened_delta = 0, cost_usd_delta = 0 } = req.body || {};
+  const d = String(date || new Date().toISOString().slice(0, 10));
+  db.prepare(`
+    INSERT INTO self_improvement_budget (date, prs_opened, cost_usd)
+    VALUES (?, ?, ?)
+    ON CONFLICT(date) DO UPDATE SET
+      prs_opened = prs_opened + ?,
+      cost_usd = cost_usd + ?
+  `).run(d, Number(prs_opened_delta) || 0, Number(cost_usd_delta) || 0,
+        Number(prs_opened_delta) || 0, Number(cost_usd_delta) || 0);
+  const row = db.prepare(`SELECT * FROM self_improvement_budget WHERE date = ?`).get(d);
+  res.json(row);
 });
 
 // Serve PWA for all non-API routes (SPA fallback)
