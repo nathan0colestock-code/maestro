@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Maestro self-improvement auto-PR runner — fires at 23:45 local, after the
+  reflection agent finishes at 23:30.
+
+  Defaults to DRY-RUN (MAESTRO_SELF_IMPROVE_DRY=true) so the first live run
+  prints the plan without opening PRs. Flip to false after a week of review.
+
+  Hard caps enforced in code:
+    - max 2 PRs per night
+    - max $3 Claude spend in rolling 24h
+    - file allowlist: router.js, worker.js, deployer.js,
+      improvement-agent.js, reflection-agent.js, definition-agent.js,
+      pipeline-stats.js. Anything outside → branch abandoned +
+      Maestro recommendation filed.
+
+  Install (orchestrator handles — do NOT install manually):
+    cp local/launchd/com.maestro.autopr.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.maestro.autopr.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.maestro.autopr</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/nathancolestock/maestro/local/launchd/run-autopr.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/nathancolestock/maestro</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>23</integer>
+    <key>Minute</key>
+    <integer>45</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/nathancolestock/Library/Logs/suite/maestro-autopr.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/nathancolestock/Library/Logs/suite/maestro-autopr.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>MAESTRO_SELF_IMPROVE_DRY</key>
+    <string>true</string>
+    <key>CLAUDE_MODEL</key>
+    <string>claude-sonnet-4-5</string>
+  </dict>
+</dict>
+</plist>

@@ -56,12 +56,19 @@ async function fetchSuiteTelemetry(app) {
 }
 
 async function collectInputs() {
-  const [suitePayloads, recommendations, captures, runs, featureSets] = await Promise.all([
+  // Two new streams per the overnight plan:
+  //   - suite_logs filtered to warn/error (last 24h) — surfaces recurring
+  //     failure events that telemetry alone doesn't expose.
+  //   - latest reflection_summaries row — Maestro-internal struggles / wins.
+  const since = new Date(Date.now() - 24 * 3600_000).toISOString();
+  const [suitePayloads, recommendations, captures, runs, featureSets, suiteLogs, reflection] = await Promise.all([
     Promise.all(SUITE_APPS.map(fetchSuiteTelemetry)),
     cloudApi('GET', '/api/recommendations?status=new,clustered').catch(() => []),
     cloudApi('GET', '/api/captures').catch(() => []),
     cloudApi('GET', '/api/worker/runs').catch(() => []),
     cloudApi('GET', '/api/feature-sets').catch(() => []),
+    cloudApi('GET', `/api/suite-logs?since=${encodeURIComponent(since)}&level=warn`).catch(() => []),
+    cloudApi('GET', '/api/self-improvement/latest').catch(() => null),
   ]);
 
   const today = new Date().toISOString().slice(0, 10);
@@ -88,7 +95,33 @@ async function collectInputs() {
       const t = Date.parse(fs.updated_at);
       return Number.isFinite(t) && Date.now() - t < 7 * 24 * 3600 * 1000;
     }),
+    // Two new streams (overnight extension).
+    suite_log_warnings_24h: summarizeSuiteLogs(suiteLogs),
+    reflection_latest: reflection,
   };
+}
+
+// Collapse warn/error rows into top N recurring events per app + small
+// samples, so the prompt stays bounded.
+export function summarizeSuiteLogs(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return { total: 0, by_app: {} };
+  const by_app = {};
+  for (const r of rows) {
+    const a = by_app[r.app] || { warn: 0, error: 0, top_events: {}, samples: [] };
+    if (r.level === 'warn') a.warn++;
+    if (r.level === 'error') a.error++;
+    a.top_events[r.event] = (a.top_events[r.event] || 0) + 1;
+    if (a.samples.length < 3) a.samples.push({ event: r.event, ctx: r.ctx });
+    by_app[r.app] = a;
+  }
+  // Sort events per app and trim.
+  for (const app of Object.keys(by_app)) {
+    const ev = by_app[app].top_events;
+    by_app[app].top_events = Object.entries(ev)
+      .sort(([, a], [, b]) => b - a).slice(0, 5)
+      .map(([name, count]) => ({ name, count }));
+  }
+  return { total: rows.length, by_app };
 }
 
 const SYSTEM_PROMPT = `You are Maestro's nightly self-improvement analyst.
@@ -105,6 +138,15 @@ INPUT STREAM 2 — USER FEATURE RECOMMENDATIONS
   Free-text suggestions the user typed or spoke into the Maestro PWA.
   These are FIRST-CLASS input, not auxiliary. A suggestion the user
   voiced is at least as important as a metric trend.
+
+INPUT STREAM 3 — SUITE LOG WARNINGS (added by the nightly log collector)
+  Per-app recurring warn/error events from the last 24h. Use to spot
+  silent failures that haven't yet surfaced in telemetry.
+
+INPUT STREAM 4 — LATEST SELF-REFLECTION
+  Maestro's own reflection-agent output for the previous night — wins,
+  struggles, and self-improvements it has already proposed. Treat the
+  "self_improvements" list as a backlog to consider promoting.
 
 RANKING RULES (apply in order)
   1. CROSS-VALIDATED first: user asked AND telemetry confirms.
@@ -138,7 +180,11 @@ OUTPUT SHAPE — return a single JSON object, no prose, matching:
       }
     ],
     "user_requested": [ /* same shape, no telemetry citation required */ ],
-    "telemetry_driven": [ /* same shape, no user rec linkage */ ]
+    "telemetry_driven": [ /* same shape, no user rec linkage */ ],
+    "self_improvement": [ /* Maestro-internal — only router.js/worker.js/
+        deployer.js/improvement-agent.js/reflection-agent.js/
+        definition-agent.js/pipeline-stats.js. Never schema, auth, or
+        daemon core loops. See auto-pr.js ALLOWLIST. */ ]
   }
 }
 
@@ -225,6 +271,7 @@ async function appendToTasksMd(repoRoot, analysis) {
     ['Cross-validated (user asked + telemetry confirms)', analysis.suggestions?.cross_validated],
     ['User-requested', analysis.suggestions?.user_requested],
     ['Telemetry-driven', analysis.suggestions?.telemetry_driven],
+    ['Self-improvement (Maestro-internal)', analysis.suggestions?.self_improvement],
   ];
   for (const [label, items] of sections) {
     if (!items?.length) continue;
@@ -283,7 +330,7 @@ export async function runNightlyAnalysis({ repoRoot = process.cwd(), dryRun = tr
   await markRecommendationsClustered(analysis);
   await appendToTasksMd(repoRoot, analysis);
 
-  console.log(`[improvement] done. cross_validated=${analysis.suggestions?.cross_validated?.length || 0}, user_requested=${analysis.suggestions?.user_requested?.length || 0}, telemetry_driven=${analysis.suggestions?.telemetry_driven?.length || 0}`);
+  console.log(`[improvement] done. cross_validated=${analysis.suggestions?.cross_validated?.length || 0}, user_requested=${analysis.suggestions?.user_requested?.length || 0}, telemetry_driven=${analysis.suggestions?.telemetry_driven?.length || 0}, self_improvement=${analysis.suggestions?.self_improvement?.length || 0}`);
 
   if (!dryRun) {
     console.log('[improvement] auto-PR is disabled by default. Set MAESTRO_AUTO_PR=true to enable (separate runner).');

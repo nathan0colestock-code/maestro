@@ -198,10 +198,19 @@ app.get('/api/status', auth, (req, res) => {
 
 // POST /api/queue/:id/ack — daemon marks a capture processed
 app.post('/api/queue/:id/ack', auth, (req, res) => {
-  const { routing_json } = req.body;
+  const { routing_json, router_confidence } = req.body;
+  // M-I-02: persist router_confidence (column added in db.js migrations)
+  // so the nightly analyst can rank captures by model confidence.
+  const conf = typeof router_confidence === 'number'
+    ? Math.max(0, Math.min(1, router_confidence))
+    : null;
   db.prepare(
-    `UPDATE captures SET processed_at = datetime('now'), routing_json = ? WHERE id = ?`
-  ).run(routing_json ? JSON.stringify(routing_json) : null, req.params.id);
+    `UPDATE captures
+       SET processed_at = datetime('now'),
+           routing_json = ?,
+           router_confidence = COALESCE(?, router_confidence)
+     WHERE id = ?`
+  ).run(routing_json ? JSON.stringify(routing_json) : null, conf, req.params.id);
   res.json({ ok: true });
 });
 

@@ -114,8 +114,14 @@ async function processQueue() {
         sessionsByProject: sessionsByProject(),
       });
 
+      // M-I-02: preserve router_confidence so the nightly analyst can
+      // spot persistent low-confidence patterns worth a router rule.
+      const confidence = typeof routingPlan?.confidence === 'number'
+        ? Math.max(0, Math.min(1, routingPlan.confidence))
+        : null;
       await api('POST', `/api/queue/${capture.id}/ack`, {
         routing_json: { plan: routingPlan, results },
+        router_confidence: confidence,
       });
     } catch (err) {
       console.error(`[route] Error processing capture ${capture.id}:`, err.message);
