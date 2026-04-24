@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { apiFetch } from './auth.js';
 import './Capture.css';
 
@@ -13,10 +13,13 @@ function formatAge(isoString) {
 }
 
 function RoutingResult({ routing }) {
-  if (!routing?.plan?.captures_decomposed?.length) return null;
+  // routing_json comes back as a string from the DB; tolerate both shapes.
+  let parsed = routing;
+  if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch { return null; } }
+  if (!parsed?.plan?.captures_decomposed?.length) return null;
   return (
     <div className="routing-result">
-      {routing.plan.captures_decomposed.map((item, i) => (
+      {parsed.plan.captures_decomposed.map((item, i) => (
         <span key={i} className="routing-tag">
           <span className="routing-project">{item.project}</span>
           <span className="routing-action">{item.action}</span>
@@ -26,10 +29,19 @@ function RoutingResult({ routing }) {
   );
 }
 
+function haptic(kind = 'light') {
+  try {
+    if (typeof navigator?.vibrate === 'function') {
+      navigator.vibrate(kind === 'success' ? [10, 40, 10] : kind === 'error' ? [40, 30, 40] : 15);
+    }
+  } catch { /* unsupported */ }
+}
+
 export default function Capture() {
   const [text, setText] = useState('');
   const [listening, setListening] = useState(false);
   const [status, setStatus] = useState(null); // null | 'sending' | 'sent' | 'error'
+  const [errorMsg, setErrorMsg] = useState(null);
   const [recent, setRecent] = useState([]);
   const [recentLoaded, setRecentLoaded] = useState(false);
   const [mode, setMode] = useState('queue'); // 'queue' | 'notebook'
@@ -45,8 +57,7 @@ export default function Capture() {
     setRecentLoaded(true);
   }, []);
 
-  // Load recent captures once on mount
-  useState(() => { loadRecent(); });
+  useEffect(() => { loadRecent(); }, [loadRecent]);
 
   function startListening() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -90,19 +101,25 @@ export default function Capture() {
     if (!trimmed) return;
 
     setStatus('sending');
+    setErrorMsg(null);
     try {
       const res = await apiFetch('/api/capture', {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: trimmed }),
       });
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) { const body = await res.text(); throw new Error(body || `HTTP ${res.status}`); }
       setText('');
       setStatus('sent');
-      setTimeout(() => setStatus(null), 2000);
+      haptic('success');
+      // Hold the success state longer so the user notices it (was 2s — too brief).
+      setTimeout(() => setStatus(null), 4000);
       loadRecent();
-    } catch {
+    } catch (err) {
+      setErrorMsg(err.message || 'send failed');
       setStatus('error');
-      setTimeout(() => setStatus(null), 3000);
+      haptic('error');
+      // Don't auto-clear; let user see error and retry.
     }
   }
 
@@ -196,7 +213,15 @@ export default function Capture() {
         </div>
 
         {listening && (
-          <p className="listening-hint">Listening… tap ⬛ to stop</p>
+          <p className="listening-hint" aria-live="polite">Listening… tap ⬛ to stop</p>
+        )}
+
+        {status === 'error' && errorMsg && (
+          <div className="capture-error" role="alert">
+            <span className="capture-error-msg">{errorMsg}</span>
+            <button className="btn-retry" onClick={send} aria-label="Retry send">Retry</button>
+            <button className="btn-dismiss" onClick={() => { setStatus(null); setErrorMsg(null); }} aria-label="Dismiss error">✕</button>
+          </div>
         )}
 
         {isNotebook && status === 'sent' && glossResult?.review_url && (

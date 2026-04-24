@@ -2,10 +2,16 @@
 
 The **autonomous orchestration layer** for a five-app personal suite. Maestro turns a voice-memo or iPhone-PWA capture into deployed, tested code that you wake up to in the morning.
 
+Part of a five-app personal suite: [gloss](https://github.com/nathan0colestock-code/gloss) · [comms](https://github.com/nathan0colestock-code/comms) · [scribe](https://github.com/nathan0colestock-code/scribe) · [black](https://github.com/nathan0colestock-code/black)
+
+![Maestro PWA — project dashboard showing live worker status and overnight queue](docs/screenshots/dashboard.png)
+
+---
+
 The flow, every night:
 
 ```
- iPhone PWA capture  ──▶  cloud intake (maestro-nc)
+ iPhone PWA capture  ──▶  cloud intake
                               │
                               ▼
                       Gemini router classifies which project(s)
@@ -17,7 +23,7 @@ The flow, every night:
                     local daemon picks up → spawns `claude -p` worker in the right repo
                               │
                               ▼
-                    worker implements on maestro/<slug> branch, runs tests
+                    worker implements on a branch, runs tests
                               │
                               ▼
                     tests green  →  merge to main  →  fly deploy  →  health check
@@ -36,7 +42,7 @@ The flow, every night:
 
 | Component | Where | What |
 |---|---|---|
-| **cloud** | Fly.io (`maestro-nc`), `cloud/` | REST API for capture intake, feature-set state, worker pings; serves the PWA dashboard |
+| **cloud** | Fly.io, `cloud/` | REST API for capture intake, feature-set state, worker pings; serves the PWA dashboard |
 | **web** | `web/` (PWA) | iPhone home-screen app for dropping captures and watching project health. Works offline (IndexedDB queue replays on reconnect) |
 | **local daemon** | user's laptop (`local/`, `com.maestro.daemon.plist` LaunchAgent) | Polls cloud, spawns Claude workers in project repos, runs the test + merge + deploy pipeline |
 | **workers** | ephemeral `claude -p` sessions | Do the actual coding on a branch; return a plain-language summary |
@@ -53,7 +59,7 @@ The daemon is the only piece with git write access. The cloud never touches repo
 - React + Vite (web PWA)
 - Google Gemini (router + synthesis)
 - Anthropic Claude CLI (workers)
-- Deployed to [Fly.io](https://fly.io) as **`maestro-nc`**
+- Deployed to [Fly.io](https://fly.io)
 - SQLite replicated to Cloudflare R2 via [Litestream](https://litestream.io)
 
 ---
@@ -132,7 +138,7 @@ Cancel: `POST /api/feature-sets/:id/cancel` sets a flag; `checkCancel` polls bet
 
 ```bash
 cd cloud
-fly deploy -a maestro-nc
+fly deploy
 ```
 
 ---

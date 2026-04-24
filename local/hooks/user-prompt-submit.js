@@ -11,7 +11,7 @@
 
 import { readFileSync } from 'fs';
 
-const CLOUD_URL = process.env.MAESTRO_CLOUD_URL || 'https://maestro-nc.fly.dev';
+const CLOUD_URL = process.env.MAESTRO_CLOUD_URL || 'https://your-maestro-app.fly.dev';
 const SECRET = process.env.MAESTRO_SECRET || '';
 const TIMEOUT_MS = 2500;
 

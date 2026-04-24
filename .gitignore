@@ -6,3 +6,8 @@ dist/
 .DS_Store
 .claude/
 reports/
+CLAUDE.md
+AUDIT-*.md
+tasks.md
+SYSTEM.md
+LESSONS.md

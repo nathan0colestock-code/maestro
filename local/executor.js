@@ -19,11 +19,11 @@ const PROJECT_PATHS = {
 // when closing the overnight loop. Projects not in this map won't auto-deploy
 // (they're still orchestrated for local work).
 const FLY_DEPLOY_MAP = {
-  comms: 'comms-nc',
-  gloss: 'gloss-nc',
-  black: 'black-hole',
-  scribe: 'scribe-nc',
-  maestro: 'maestro-nc', // deploys the cloud subdirectory
+  comms: process.env.COMMS_FLY_APP || 'your-comms-app',
+  gloss: process.env.GLOSS_FLY_APP || 'your-gloss-app',
+  black: process.env.BLACK_FLY_APP || 'your-black-app',
+  scribe: process.env.SCRIBE_FLY_APP || 'your-scribe-app',
+  maestro: process.env.MAESTRO_FLY_APP || 'your-maestro-app', // deploys the cloud subdirectory
 };
 
 const AUTO_LAUNCH = process.env.AUTO_LAUNCH_SESSIONS !== 'false';

@@ -1022,6 +1022,120 @@ app.post('/api/gloss/voice', auth, async (req, res) => {
   }
 });
 
+// ── Self-improvement loop endpoints ───────────────────────────────────────
+// Power the nightly analyst (local/improvement-agent.js) and the PWA's
+// "Suggest improvement" surface. See plan: elegant-napping-fox.md.
+
+function safeParseJson(s) {
+  if (s == null) return null;
+  try { return JSON.parse(s); } catch { return s; }
+}
+
+// GET /api/recommendations?status=new,clustered&target=maestro
+app.get('/api/recommendations', auth, (req, res) => {
+  const { status, target } = req.query;
+  const where = [];
+  const params = [];
+  if (status) {
+    const list = String(status).split(',').map(s => s.trim()).filter(Boolean);
+    if (list.length) { where.push(`status IN (${list.map(() => '?').join(',')})`); params.push(...list); }
+  }
+  if (target) { where.push('target_app = ?'); params.push(String(target)); }
+  const sql = `SELECT * FROM feature_recommendations
+               ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+               ORDER BY created_at DESC LIMIT 200`;
+  res.json(db.prepare(sql).all(...params));
+});
+
+// POST /api/recommendations — user submits a feature suggestion.
+app.post('/api/recommendations', auth, (req, res) => {
+  const { text, source = 'pwa_text', target_app = null, priority = 3 } = req.body || {};
+  if (!text || typeof text !== 'string' || !text.trim()) {
+    return res.status(400).json({ error: 'text required' });
+  }
+  const info = db.prepare(`
+    INSERT INTO feature_recommendations (source, target_app, text, priority)
+    VALUES (?, ?, ?, ?)
+  `).run(String(source), target_app ? String(target_app) : null, text.trim(), Number(priority) || 3);
+  res.json({ ok: true, id: info.lastInsertRowid });
+});
+
+// POST /api/recommendations/:id — update (user reprioritize, analyst cluster).
+app.post('/api/recommendations/:id(\\d+)', auth, (req, res) => {
+  const id = Number(req.params.id);
+  const { priority, status, theme, reject_reason, linked_pr_url } = req.body || {};
+  const updates = [];
+  const params = [];
+  if (priority != null)      { updates.push('priority = ?');      params.push(Number(priority)); }
+  if (status != null)        { updates.push('status = ?');        params.push(String(status)); }
+  if (theme != null)         { updates.push('theme = ?');         params.push(String(theme)); }
+  if (reject_reason != null) { updates.push('reject_reason = ?'); params.push(String(reject_reason)); }
+  if (linked_pr_url != null) { updates.push('linked_pr_url = ?'); params.push(String(linked_pr_url)); }
+  if (status === 'shipped' || status === 'rejected') {
+    updates.push("resolved_at = datetime('now')");
+  }
+  if (!updates.length) return res.status(400).json({ error: 'no fields to update' });
+  params.push(id);
+  db.prepare(`UPDATE feature_recommendations SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+  res.json({ ok: true });
+});
+
+// POST /api/routing-feedback — user reports a misroute.
+app.post('/api/routing-feedback', auth, (req, res) => {
+  const { capture_id, action, detail } = req.body || {};
+  if (!action) return res.status(400).json({ error: 'action required' });
+  const info = db.prepare(`
+    INSERT INTO routing_feedback (capture_id, action, detail) VALUES (?, ?, ?)
+  `).run(capture_id ? Number(capture_id) : null, String(action),
+         detail == null ? null : (typeof detail === 'string' ? detail : JSON.stringify(detail)));
+  res.json({ ok: true, id: info.lastInsertRowid });
+});
+
+// POST /api/suite-telemetry — daemon pushes nightly payloads per app.
+app.post('/api/suite-telemetry', auth, (req, res) => {
+  const { app: appName, date, payload } = req.body || {};
+  if (!appName || !date || payload == null) return res.status(400).json({ error: 'app, date, payload required' });
+  const json = typeof payload === 'string' ? payload : JSON.stringify(payload);
+  db.prepare(`
+    INSERT INTO suite_telemetry (app, date, payload) VALUES (?, ?, ?)
+    ON CONFLICT(app, date) DO UPDATE SET payload = excluded.payload
+  `).run(String(appName), String(date), json);
+  res.json({ ok: true });
+});
+
+app.get('/api/suite-telemetry', auth, (req, res) => {
+  const days = Math.max(1, Math.min(90, Number(req.query.days) || 7));
+  const rows = db.prepare(`
+    SELECT app, date, payload, created_at FROM suite_telemetry
+    WHERE date(date) >= date('now', ?)
+    ORDER BY date DESC, app ASC
+  `).all(`-${days} day`);
+  res.json(rows.map(r => ({ ...r, payload: safeParseJson(r.payload) })));
+});
+
+app.post('/api/nightly-summary', auth, (req, res) => {
+  const { date, summary, suggestions } = req.body || {};
+  if (!date) return res.status(400).json({ error: 'date required' });
+  const sumJson = summary == null ? null : (typeof summary === 'string' ? summary : JSON.stringify(summary));
+  const sugJson = suggestions == null ? null : (typeof suggestions === 'string' ? suggestions : JSON.stringify(suggestions));
+  db.prepare(`
+    INSERT INTO telemetry_summary (date, summary, suggestions) VALUES (?, ?, ?)
+    ON CONFLICT(date) DO UPDATE SET summary = excluded.summary, suggestions = excluded.suggestions
+  `).run(String(date), sumJson, sugJson);
+  res.json({ ok: true });
+});
+
+app.get('/api/nightly-summary/latest', auth, (req, res) => {
+  const row = db.prepare(`SELECT date, summary, suggestions, created_at FROM telemetry_summary ORDER BY date DESC LIMIT 1`).get();
+  if (!row) return res.json(null);
+  res.json({
+    date: row.date,
+    summary: safeParseJson(row.summary),
+    suggestions: safeParseJson(row.suggestions),
+    created_at: row.created_at,
+  });
+});
+
 // Serve PWA for all non-API routes (SPA fallback)
 app.get('*', (req, res) => {
   res.sendFile(join(__dirname, 'public', 'index.html'));

@@ -143,5 +143,59 @@ safeMigrate('ALTER TABLE worker_runs ADD COLUMN tokens_out INTEGER');
 // The reflector sets source='reflector' so its self-proposed captures can
 // be filtered out of day-time dashboards if desired.
 safeMigrate('ALTER TABLE captures ADD COLUMN source TEXT');
+// Router confidence (0-1) recorded per capture so the nightly analyst can
+// spot persistent low-confidence patterns worth a router rule.
+safeMigrate('ALTER TABLE captures ADD COLUMN router_confidence REAL');
+
+db.exec(`
+  -- User feedback on how a capture was routed. The nightly analyst ranks
+  -- patterns across this table to propose router-rule changes.
+  CREATE TABLE IF NOT EXISTS routing_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    capture_id INTEGER REFERENCES captures(id),
+    action TEXT NOT NULL,            -- 'moved_to_project' | 'deleted' | 'split' | 'merged' | 'wrong_project'
+    detail TEXT,                     -- JSON: from/to project, user note, etc.
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  -- One row per nightly analysis. summary/suggestions are JSON blobs.
+  CREATE TABLE IF NOT EXISTS telemetry_summary (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL UNIQUE,
+    summary TEXT,
+    suggestions TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  -- Raw nightly payloads pulled from each suite app. UNIQUE(app, date) lets
+  -- the daemon re-run the collector without dup rows.
+  CREATE TABLE IF NOT EXISTS suite_telemetry (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    app TEXT NOT NULL,
+    date TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(app, date)
+  );
+
+  -- First-class training input: user-submitted feature suggestions captured
+  -- via the PWA (voice or text). The nightly analyst ranks these above
+  -- telemetry-only hunches; cross-validated items rank highest.
+  CREATE TABLE IF NOT EXISTS feature_recommendations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,            -- 'pwa_voice' | 'pwa_text' | 'dashboard_inline' | 'tasks_md'
+    target_app TEXT,                 -- maestro | gloss | comms | black | scribe | suite
+    text TEXT NOT NULL,
+    theme TEXT,                      -- clustered theme (set by nightly analyst)
+    priority INTEGER DEFAULT 3,      -- user-set urgency 1-5
+    status TEXT NOT NULL DEFAULT 'new', -- new | clustered | proposed | shipped | rejected | duplicate
+    linked_pr_url TEXT,
+    reject_reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_feature_recs_status ON feature_recommendations(status);
+  CREATE INDEX IF NOT EXISTS idx_feature_recs_target ON feature_recommendations(target_app);
+`);
 
 export default db;

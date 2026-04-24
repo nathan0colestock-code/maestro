@@ -1,7 +1,7 @@
 // Suite app switcher — Google-Workspace-style grid in the top-right of every
-// suite app's header. Served from maestro-nc so there's one source of truth.
+// suite app's header. Served from the maestro cloud app so there's one source of truth.
 //
-// Usage: <script src="https://maestro-nc.fly.dev/suite-switcher.js" defer></script>
+// Usage: <script src="https://your-maestro-app.fly.dev/suite-switcher.js" defer></script>
 // Optional: set `window.__SUITE_CURRENT__ = 'gloss'` before this loads to dim
 //           the current app's tile so you don't click back into the app
 //           you're already in.
@@ -15,14 +15,14 @@
   window.__SUITE_SWITCHER__ = true;
 
   const APPS = [
-    { key: 'gloss',   label: 'Gloss',    url: 'https://gloss-nc.fly.dev',    hue: '#c9a97a' },
-    { key: 'comms',   label: "Comm's",   url: 'https://comms-nc.fly.dev',    hue: '#6b9bd1' },
+    { key: 'gloss',   label: 'Gloss',    url: process.env.GLOSS_URL || 'https://your-gloss-app.fly.dev',    hue: '#c9a97a' },
+    { key: 'comms',   label: "Comm's",   url: process.env.COMMS_URL || 'https://your-comms-app.fly.dev',    hue: '#6b9bd1' },
     // Black's accent is the classify-purple used in its login and header chrome.
-    { key: 'black',   label: 'Black',    url: 'https://black-hole.fly.dev',  hue: '#a78bfa' },
-    { key: 'scribe',  label: 'Scribe',   url: 'https://scribe-nc.fly.dev',   hue: '#8a6da5' },
+    { key: 'black',   label: 'Black',    url: process.env.BLACK_URL || 'https://your-black-app.fly.dev',  hue: '#a78bfa' },
+    { key: 'scribe',  label: 'Scribe',   url: process.env.SCRIBE_URL || 'https://your-scribe-app.fly.dev',   hue: '#8a6da5' },
     // Maestro sits at the end of the grid so the suite switcher can route back
     // to the orchestrator dashboard. Softer grey reads as "meta" vs. the apps.
-    { key: 'maestro', label: 'Maestro',  url: 'https://maestro-nc.fly.dev',  hue: '#4a4a4a' },
+    { key: 'maestro', label: 'Maestro',  url: process.env.MAESTRO_URL || 'https://your-maestro-app.fly.dev',  hue: '#4a4a4a' },
   ];
 
   const STYLE = `

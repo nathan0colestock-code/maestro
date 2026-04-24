@@ -1,7 +1,7 @@
 # Fly.io deployment config for maestro cloud relay
 # Deploy with: fly launch (first time) or fly deploy (subsequent)
 
-app = "maestro-nc"
+app = "your-maestro-app"
 primary_region = "ord"
 
 [build]
