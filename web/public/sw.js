@@ -108,3 +108,34 @@ self.addEventListener('message', (event) => {
     event.waitUntil(MaestroOfflineCapture.drainCaptures());
   }
 });
+
+// SPEC 6 — push notifications.
+// Payload shape: { title, body, url, transition, feature_set_id? }
+self.addEventListener('push', (event) => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch { data = {}; }
+  const title = data.title || 'Maestro';
+  const options = {
+    body: data.body || '',
+    icon: '/icon-192.png',
+    badge: '/icon-192.png',
+    data: { url: data.url || '/', transition: data.transition, feature_set_id: data.feature_set_id },
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const targetUrl = event.notification.data?.url || '/';
+  event.waitUntil((async () => {
+    const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    // Focus an existing Maestro tab if one is open.
+    for (const client of allClients) {
+      if ('focus' in client) {
+        await client.navigate?.(targetUrl).catch(() => {});
+        return client.focus();
+      }
+    }
+    if (self.clients.openWindow) return self.clients.openWindow(targetUrl);
+  })());
+});

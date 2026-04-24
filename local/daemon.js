@@ -8,6 +8,7 @@ import { deployProject } from './deployer.js';
 import { runProjectTests, runIntegrationTests, checkoutBranch, branchExists } from './test-runner.js';
 import { getProjectStats, detectRegression } from './pipeline-stats.js';
 import { runNightlyReflection, alreadyReflectedToday } from './nightly-reflect.js';
+import { matchThreadToSet } from './definition-gate.js';
 import { readFile } from 'fs/promises';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
@@ -243,13 +244,35 @@ async function drainFeatureSets() {
     const projectPath = getProjectPath(project.name);
     if (!projectPath) continue;
 
+    // SPEC 7 gate: cross-app sets (extras.length > 0) require an approved
+    // definition thread before dispatch. If none exists, mark the set
+    // needs_definition so the PWA "Define" tab surfaces it, and skip.
+    // Single-project sets proceed as before.
+    if (extras.length > 0 && !(await hasApprovedDefinitionThread(set))) {
+      console.log(`[drain] ${project.name} feature set #${set.id} needs_definition — cross-app without approved thread`);
+      await api('POST', `/api/feature-sets/${set.id}/status`, {
+        status: 'needs_definition',
+        note: 'Awaiting Feature Definition thread approval (SPEC 7).',
+      }).catch(() => {});
+      continue;
+    }
+
+    // If an approved thread exists and supplied generated_spec, enrich the
+    // feature-set description with it so the worker gets the curated brief
+    // instead of the raw capture. Single-project sets inherit the spec too
+    // when a thread was used.
+    const approvedThread = await findApprovedDefinitionThread(set);
+    const featureSetForDispatch = approvedThread?.generated_spec
+      ? { ...set, description: `${set.description || ''}\n\n## Approved spec\n${approvedThread.generated_spec}`.trim() }
+      : set;
+
     console.log(`[drain] ${project.name} → feature set #${set.id} "${set.title}" (${set.tasks.length} task(s))${extras.length ? ` [+peers: ${extras.join(', ')}]` : ''}`);
     let projectStats = null;
     try { projectStats = await getProjectStats(project.name, { lookback_days: 7 }); } catch {}
     try {
       const result = await dispatchFeatureSet({
         projectName: project.name, projectPath,
-        featureSet: set, cloudApi: api, projectStats,
+        featureSet: featureSetForDispatch, cloudApi: api, projectStats,
       });
       if (result?.status === 'worker_started') {
         for (const p of involved) reservedThisTick.add(p);
@@ -258,6 +281,18 @@ async function drainFeatureSets() {
       console.error(`[drain] ${project.name} dispatch failed:`, err.message);
     }
   }
+}
+
+async function findApprovedDefinitionThread(set) {
+  try {
+    const threads = await api('GET', '/api/definition-threads?status=approved');
+    return matchThreadToSet(set, threads);
+  } catch { return null; }
+}
+
+async function hasApprovedDefinitionThread(set) {
+  const t = await findApprovedDefinitionThread(set);
+  return t != null;
 }
 
 // In-flight pipeline lock. The pipeline takes ~1 min (test + merge + deploy +
